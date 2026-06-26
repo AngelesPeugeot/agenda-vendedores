@@ -75,9 +75,10 @@ const PALETA_ISLAS = {
     { bg: "#DCE7F5", border: "#33619F", text: "#1A3454" },
     { bg: "#D1E0F2", border: "#27538D", text: "#162D49" },
   ]},
-  "Gran Canaria": { hue: "#3F9999", family: [
+"Gran Canaria": { hue: "#3F9999", family: [
     { bg: "#E3F1F1", border: "#3F9999", text: "#1F4D4D" },
     { bg: "#D8ECEC", border: "#358888", text: "#1A4343" },
+    { bg: "#CDE6E6", border: "#2B7777", text: "#163939" },
   ]},
   "Lanzarote": { hue: "#C97C4A", family: [
     { bg: "#FBEFE6", border: "#C97C4A", text: "#7A4426" },
@@ -88,16 +89,13 @@ const PALETA_ISLAS = {
   "La Palma": { hue: "#7AAE4A", family: [
     { bg: "#EAF5E3", border: "#7AAE4A", text: "#3D5E22" },
   ]},
-};
-
 const ISLAS_SEDES = {
-  "Tenerife": ["Mayorazgo", "La Orotava", "Chafiras", "Sebadal", "Miller Bajo", "Arinaga"],
-  "Gran Canaria": [],
+  "Tenerife": ["Mayorazgo", "La Orotava", "Chafiras"],
+  "Gran Canaria": ["Miller Bajo", "Sebadal", "Arinaga"],
   "Lanzarote": ["Lanzarote"],
   "Fuerteventura": ["Fuerteventura"],
   "La Palma": ["La Palma"],
-};
-const ISLAS = Object.keys(ISLAS_SEDES);
+};const ISLAS = Object.keys(ISLAS_SEDES);
 
 // Asigna un color a cada sede dentro de su isla, ciclando si hay más sedes que tonos.
 function colorParaSede(isla, sede) {

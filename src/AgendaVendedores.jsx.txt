@@ -48,6 +48,7 @@ const firebaseConfig = {
   messagingSenderId: "220024137396",
   appId: "1:220024137396:web:e4529ac83e5526af4219e1",
 };
+
 let app, db, firebaseDisponible = false;
 try {
   if (firebaseConfig.apiKey && firebaseConfig.apiKey !== "TU_API_KEY") {

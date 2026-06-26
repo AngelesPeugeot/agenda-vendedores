@@ -40,13 +40,13 @@ import * as XLSX from "xlsx";
 // algo como https://TU_PROYECTO-default-rtdb.europe-west1.firebasedatabase.app).
 // =====================================================================
 const firebaseConfig = {
-  apiKey: "AIzaSyC9WndH7H0c5NRGSQzMrBYquF2sq-vPJVo",
-  authDomain: "agenda-vendedores-40cc8.firebaseapp.com",
-  databaseURL: "https://agenda-vendedores-40cc8-default-rtdb.europe-west1.firebasedatabase.app",
-  projectId: "agenda-vendedores-40cc8",
-  storageBucket: "agenda-vendedores-40cc8.firebasestorage.app",
-  messagingSenderId: "220024137396",
-  appId: "1:220024137396:web:e4529ac83e5526af4219e1",
+  apiKey: "AIzaSyDv5QkZZO-Dtz1IVdwBTAbXapoEeV5zW-A",
+  authDomain: "agenda-compartida-e2ade.firebaseapp.com",
+  databaseURL: "https://agenda-compartida-e2ade-default-rtdb.europe-west1.firebasedatabase.app",
+  projectId: "agenda-compartida-e2ade",
+  storageBucket: "agenda-compartida-e2ade.firebasestorage.app",
+  messagingSenderId: "918296486161",
+  appId: "1:918296486161:web:5ea610fdf576570b6facb0",
 };
 
 let app, db, firebaseDisponible = false;
@@ -75,7 +75,7 @@ const PALETA_ISLAS = {
     { bg: "#DCE7F5", border: "#33619F", text: "#1A3454" },
     { bg: "#D1E0F2", border: "#27538D", text: "#162D49" },
   ]},
-"Gran Canaria": { hue: "#3F9999", family: [
+  "Gran Canaria": { hue: "#3F9999", family: [
     { bg: "#E3F1F1", border: "#3F9999", text: "#1F4D4D" },
     { bg: "#D8ECEC", border: "#358888", text: "#1A4343" },
     { bg: "#CDE6E6", border: "#2B7777", text: "#163939" },
@@ -89,6 +89,8 @@ const PALETA_ISLAS = {
   "La Palma": { hue: "#7AAE4A", family: [
     { bg: "#EAF5E3", border: "#7AAE4A", text: "#3D5E22" },
   ]},
+};
+
 const ISLAS_SEDES = {
   "Tenerife": ["Mayorazgo", "La Orotava", "Chafiras"],
   "Gran Canaria": ["Miller Bajo", "Sebadal", "Arinaga"],

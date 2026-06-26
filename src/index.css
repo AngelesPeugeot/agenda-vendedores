@@ -1,0 +1,13 @@
+:root {
+  font-family: 'Inter', system-ui, -apple-system, sans-serif;
+  color-scheme: light;
+}
+
+body {
+  margin: 0;
+  background: #F1EAD9;
+}
+
+#root {
+  min-height: 100vh;
+}

@@ -95,7 +95,8 @@ const ISLAS_SEDES = {
   "Lanzarote": ["Lanzarote"],
   "Fuerteventura": ["Fuerteventura"],
   "La Palma": ["La Palma"],
-};const ISLAS = Object.keys(ISLAS_SEDES);
+};
+const ISLAS = Object.keys(ISLAS_SEDES);
 
 // Asigna un color a cada sede dentro de su isla, ciclando si hay más sedes que tonos.
 function colorParaSede(isla, sede) {

@@ -28,6 +28,7 @@ import {
   WifiOff,
   Wifi,
   BarChart3,
+  UserCog,
 } from "lucide-react";
 import * as XLSX from "xlsx";
 
@@ -185,8 +186,9 @@ function addDays(date, n) {
 // configurado, para que la app siga siendo usable en modo demo/individual.
 // Estructura de colecciones:
 //   vendedores/{id}            -> {nombre, isla, sede}
+//   gestores/{id}               -> {nombre}  (gestor lead: crea la cita, distinto del vendedor)
 //   turnos/{weekKey}_{vendorId} -> {weekKey, vendorId, dias: {0:[...],...}}
-//   citas/{id}                  -> {weekKey, vendorId, day, hour, cliente, telefono}
+//   citas/{id}                  -> {weekKey, vendorId, gestorId, day, hour, cliente, telefono}
 //   ventas/listado               -> {fileName, uploadedAt, records}
 // =====================================================================
 
@@ -241,6 +243,49 @@ function useVendedoresSync() {
   }, []);
 
   return { vendedores, loading, addVendedor, removeVendedor, updateVendedor };
+}
+
+// Gestores lead: personas que generan/crean la cita, distintas del vendedor que la atiende.
+// Solo tienen nombre, sin isla/sede ni turnos asociados.
+function useGestoresSync() {
+  const [gestores, setGestores] = useState([]);
+  const [loadingGestores, setLoadingGestores] = useState(true);
+
+  useEffect(() => {
+    if (!firebaseDisponible) {
+      setLoadingGestores(false);
+      return;
+    }
+    const gestoresRef = ref(db, "gestores");
+    const unsub = onValue(gestoresRef, (snap) => {
+      const data = snap.val() || {};
+      const list = Object.entries(data).map(([id, g]) => ({ id, ...g }));
+      setGestores(list);
+      setLoadingGestores(false);
+    }, (err) => {
+      console.error("Error sincronizando gestores", err);
+      setLoadingGestores(false);
+    });
+    return () => unsub();
+  }, []);
+
+  const addGestor = useCallback(async (gestor) => {
+    if (!firebaseDisponible) {
+      setGestores((prev) => [...prev, gestor]);
+      return;
+    }
+    await set(ref(db, `gestores/${gestor.id}`), { nombre: gestor.nombre });
+  }, []);
+
+  const removeGestor = useCallback(async (id) => {
+    if (!firebaseDisponible) {
+      setGestores((prev) => prev.filter((g) => g.id !== id));
+      return;
+    }
+    await remove(ref(db, `gestores/${id}`));
+  }, []);
+
+  return { gestores, loadingGestores, addGestor, removeGestor };
 }
 
 function useTurnosSync(weekKey) {
@@ -356,6 +401,7 @@ export default function AgendaVendedores() {
   const weekKey = useMemo(() => fmtWeekKey(weekStart), [weekStart]);
 
   const { vendedores, loading, addVendedor, removeVendedor, updateVendedor } = useVendedoresSync();
+  const { gestores, loadingGestores, addGestor, removeGestor } = useGestoresSync();
   const { turnos, setTurnoVendorDia } = useTurnosSync(weekKey);
   const { citas, addCita, updateCita, removeCita } = useCitasSync(weekKey);
   const { ventas, guardarVentas } = useVentasSync();
@@ -365,6 +411,7 @@ export default function AgendaVendedores() {
   const [nuevoVendedorNombre, setNuevoVendedorNombre] = useState("");
   const [nuevoVendedorIsla, setNuevoVendedorIsla] = useState(ISLAS[0]);
   const [nuevoVendedorSede, setNuevoVendedorSede] = useState((ISLAS_SEDES[ISLAS[0]] || [])[0] || "");
+  const [nuevoGestorNombre, setNuevoGestorNombre] = useState("");
   const [toast, setToast] = useState(null);
   const [subiendoArchivo, setSubiendoArchivo] = useState(false);
   const [errorArchivo, setErrorArchivo] = useState(null);
@@ -398,6 +445,27 @@ export default function AgendaVendedores() {
       showToast(v ? `${v.nombre} eliminado` : "Vendedor eliminado");
     },
     [vendedores, citas, removeVendedor, removeCita, showToast]
+  );
+
+  // ---------- Gestores lead ----------
+  const handleAddGestor = useCallback(async () => {
+    const nombre = nuevoGestorNombre.trim();
+    if (!nombre) return;
+    const nuevo = { id: genId(), nombre };
+    await addGestor(nuevo);
+    setNuevoGestorNombre("");
+    showToast(`${nombre} añadido como gestor lead`);
+  }, [nuevoGestorNombre, addGestor, showToast]);
+
+  const handleRemoveGestor = useCallback(
+    async (id) => {
+      const g = gestores.find((x) => x.id === id);
+      await removeGestor(id);
+      showToast(g ? `${g.nombre} eliminado` : "Gestor eliminado");
+      // No borramos las citas que ya tuviera asignado este gestor: simplemente quedan
+      // sin gestor asociado (gestorId apunta a un id que ya no existe en la lista).
+    },
+    [gestores, removeGestor, showToast]
   );
 
   const vendedoresFiltrados = useMemo(() => {
@@ -498,9 +566,9 @@ export default function AgendaVendedores() {
   );
 
   const handleSaveCita = useCallback(
-    async (vendorId, dayIdx, hour, cliente, telefono, idExistente) => {
+    async (vendorId, dayIdx, hour, cliente, telefono, idExistente, gestorId) => {
       if (idExistente) {
-        await updateCita(idExistente, { vendorId, day: dayIdx, hour, cliente: cliente || "", telefono: telefono || "" });
+        await updateCita(idExistente, { vendorId, day: dayIdx, hour, cliente: cliente || "", telefono: telefono || "", gestorId: gestorId || "" });
         showToast("Cita actualizada");
       } else {
         await addCita({
@@ -510,6 +578,7 @@ export default function AgendaVendedores() {
           hour,
           cliente: cliente || "",
           telefono: telefono || "",
+          gestorId: gestorId || "",
           estado: "activa",
         });
         showToast("Cita asignada");
@@ -561,12 +630,13 @@ export default function AgendaVendedores() {
       const kPhone = findKey("telefono", "tel", "movil", "phone");
       const kDate = findKey("fecha");
       const kVendedor = findKey("vendedor", "comercial", "asesor");
+      const kGestorLead = findKey("gestor", "lead", "captador");
       const kCoche = findKey("matricula", "coche", "vehiculo", "car");
       const kModelo = findKey("modelo", "model");
-      const kIsla = findKey("isla", "island");
+      const kIsla = findKey("isla", "island", "provincia");
       const kSede = findKey("sede", "oficina", "delegacion", "branch");
       const kCliente = findKey("cliente", "nombre", "customer", "client");
-      const kVendido = findKey("vendido", "venta", "sold", "estado");
+      const kVendido = findKey("vendido", "venta", "sold", "estado", "cierre");
 
       if (!kPhone) {
         setErrorArchivo("No he encontrado una columna de teléfono en el archivo.");
@@ -574,13 +644,30 @@ export default function AgendaVendedores() {
         return;
       }
 
+      // Algunos listados usan siglas de provincia en vez del nombre completo de la isla.
+      const SIGLAS_ISLA = {
+        tf: "Tenerife",
+        gc: "Gran Canaria",
+        lz: "Lanzarote",
+        fv: "Fuerteventura",
+        lp: "La Palma",
+      };
+      const normalizarIsla = (val) => {
+        const s = String(val ?? "").trim();
+        if (!s) return "";
+        const sigla = SIGLAS_ISLA[s.toLowerCase()];
+        return sigla || s;
+      };
+
+      // Estados que cuentan como venta confirmada (p.ej. "Vendido", "Pedido" = reserva en curso).
+      // Vacío o estados intermedios (p.ej. "Presupuesto") se consideran "sin decidir todavía".
       const esVendidoTexto = (val) => {
         if (val === true || val === 1) return true;
         const s = String(val ?? "").trim().toLowerCase();
         if (!s) return null; // sin dato: no afirmamos nada
-        if (["si", "sí", "vendido", "vendida", "yes", "true", "1", "x"].includes(s)) return true;
-        if (["no", "pendiente", "false", "0"].includes(s)) return false;
-        return null;
+        if (["si", "sí", "vendido", "vendida", "pedido", "yes", "true", "1", "x"].includes(s)) return true;
+        if (["no", "perdido", "perdida", "cancelado", "cancelada", "no interesa", "pendiente", "false", "0"].includes(s)) return false;
+        return null; // estados intermedios desconocidos (ej. "Presupuesto"): no afirmamos nada
       };
 
       const records = rows
@@ -588,9 +675,10 @@ export default function AgendaVendedores() {
           phone: normalizePhone(r[kPhone]),
           date: kDate ? parseAnyDate(r[kDate]) : null,
           vendedor: kVendedor ? String(r[kVendedor] || "").trim() : "",
+          gestorLead: kGestorLead ? String(r[kGestorLead] || "").trim() : "",
           coche: kCoche ? String(r[kCoche] || "").trim() : "",
           modelo: kModelo ? String(r[kModelo] || "").trim() : "",
-          isla: kIsla ? String(r[kIsla] || "").trim() : "",
+          isla: kIsla ? normalizarIsla(r[kIsla]) : "",
           sede: kSede ? String(r[kSede] || "").trim() : "",
           cliente: kCliente ? String(r[kCliente] || "").trim() : "",
           vendido: kVendido ? esVendidoTexto(r[kVendido]) : null,
@@ -671,6 +759,15 @@ export default function AgendaVendedores() {
   const minCarga = vendedores.length ? Math.min(...Object.values(cargaPorVendedor)) : 0;
   const desbalanceado = vendedores.length > 1 && maxCarga - minCarga >= 2;
 
+  const citasPorGestor = useMemo(() => {
+    const map = {};
+    gestores.forEach((g) => (map[g.id] = 0));
+    citasActivas.forEach((c) => {
+      if (c.gestorId) map[c.gestorId] = (map[c.gestorId] || 0) + 1;
+    });
+    return map;
+  }, [gestores, citasActivas]);
+
   // ---------- Resumen anual del listado de ventas ----------
   const resumenVentas = useMemo(() => {
     if (!ventas || !ventas.records || ventas.records.length === 0) return null;
@@ -698,6 +795,7 @@ export default function AgendaVendedores() {
     };
 
     const porVendedor = agrupar("vendedor");
+    const porGestorLead = agrupar("gestorLead");
     const porIsla = agrupar("isla");
     const porModelo = agrupar("modelo");
 
@@ -711,6 +809,7 @@ export default function AgendaVendedores() {
       totalNoVendidos: noVendidos.length,
       tasaConversion,
       porVendedor,
+      porGestorLead,
       porIsla,
       porModelo,
       fechaMin,
@@ -754,6 +853,9 @@ export default function AgendaVendedores() {
             </button>
             <button onClick={() => setVista("vendedores")} style={vista === "vendedores" ? styles.tabActive : styles.tab}>
               <Users size={15} /> Vendedores
+            </button>
+            <button onClick={() => setVista("gestores")} style={vista === "gestores" ? styles.tabActive : styles.tab}>
+              <UserCog size={15} /> Gestores
             </button>
             <button onClick={() => setVista("ventas")} style={vista === "ventas" ? styles.tabActive : styles.tab}>
               <CarFront size={15} /> Ventas
@@ -919,6 +1021,45 @@ export default function AgendaVendedores() {
         </div>
       )}
 
+      {gestores.length >= 0 && vista === "gestores" && (
+        <div style={styles.panel}>
+          <div style={styles.panelTitle}>Gestores lead</div>
+          <div style={styles.panelHint}>
+            Quienes generan o captan la cita, antes de que la atienda un vendedor. Se usan para analizar KPIs de citas, ventas y visitas por gestor.
+          </div>
+          <div style={styles.addRow}>
+            <input
+              value={nuevoGestorNombre}
+              onChange={(e) => setNuevoGestorNombre(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && handleAddGestor()}
+              placeholder="Nombre del gestor lead"
+              style={styles.input}
+            />
+            <button onClick={handleAddGestor} style={styles.primaryBtn}>
+              <Plus size={16} /> Añadir
+            </button>
+          </div>
+          <div style={styles.vendorList}>
+            {gestores.length === 0 ? (
+              <div style={styles.panelHint}>Aún no hay gestores lead añadidos.</div>
+            ) : (
+              gestores.map((g) => (
+                <div key={g.id} style={{ ...styles.vendorCard, borderLeftColor: "#A8835A" }}>
+                  <div style={{ ...styles.vendorDot, background: "#A8835A" }} />
+                  <div style={{ flex: 1, minWidth: 140 }}>
+                    <div style={styles.vendorName}>{g.nombre}</div>
+                    <div style={styles.vendorMeta}>{citasPorGestor[g.id] || 0} citas esta semana</div>
+                  </div>
+                  <button onClick={() => handleRemoveGestor(g.id)} style={styles.iconBtn} aria-label={`Eliminar ${g.nombre}`}>
+                    <Trash2 size={15} />
+                  </button>
+                </div>
+              ))
+            )}
+          </div>
+        </div>
+      )}
+
       {vendedores.length > 0 && vista === "turnos" && (
         <div style={styles.panel}>
           <div style={styles.panelTitle}>Turnos rotativos de la semana</div>
@@ -1030,6 +1171,7 @@ export default function AgendaVendedores() {
                     .filter((c) => c.telefono)
                     .map((c) => {
                       const v = vendedores.find((vv) => vv.id === c.vendorId);
+                      const g = gestores.find((gg) => gg.id === c.gestorId);
                       const matches = ventasParaTelefono(c.telefono);
                       const vendida = esVendida(matches);
                       const mejor = matches[0];
@@ -1043,6 +1185,7 @@ export default function AgendaVendedores() {
                             </div>
                             <div style={styles.cotejoMeta}>
                               {DIAS[c.day]} {horaLabel(c.hour)} · {v?.nombre || "—"}
+                              {(g?.nombre || mejor?.gestorLead) ? ` · Gestor: ${g?.nombre || mejor.gestorLead}` : ""}
                               {mejor?.isla ? ` · ${mejor.isla}` : ""}
                               {mejor?.sede ? ` (${mejor.sede})` : ""}
                             </div>
@@ -1111,6 +1254,7 @@ export default function AgendaVendedores() {
               </div>
 
               <InformeTabla titulo="Por vendedor" filas={resumenVentas.porVendedor} />
+              <InformeTabla titulo="Por gestor lead" filas={resumenVentas.porGestorLead} />
               <InformeTabla titulo="Por isla" filas={resumenVentas.porIsla} />
               <InformeTabla titulo="Por modelo" filas={resumenVentas.porModelo} />
             </>
@@ -1140,6 +1284,7 @@ export default function AgendaVendedores() {
                       {citasSlot.map((c) => {
                         const v = vendedores.find((vv) => vv.id === c.vendorId);
                         if (!v) return null;
+                        const g = gestores.find((gg) => gg.id === c.gestorId);
                         const colorV = colorParaSede(v.isla, v.sede);
                         const vendida = citasConVenta.has(c.id);
                         const fueraDeFiltro = !vendedoresFiltrados.some((vf) => vf.id === v.id);
@@ -1154,10 +1299,13 @@ export default function AgendaVendedores() {
                               color: colorV.text,
                               opacity: fueraDeFiltro ? 0.4 : 1,
                             }}
-                            title={`${v.nombre}${c.cliente ? " · " + c.cliente : ""}${c.telefono ? " · " + c.telefono : ""}`}
+                            title={`${v.nombre}${c.cliente ? " · " + c.cliente : ""}${c.telefono ? " · " + c.telefono : ""}${g ? " · Gestor: " + g.nombre : ""}`}
                           >
                             <span style={{ ...styles.citaDot, background: colorV.border }} />
-                            <span style={styles.citaChipText}>{v.nombre.split(" ")[0]}{c.cliente ? ` · ${c.cliente}` : ""}</span>
+                            <span style={styles.citaChipTextWrap}>
+                              <span style={styles.citaChipText}>{v.nombre.split(" ")[0]}{c.cliente ? ` · ${c.cliente}` : ""}</span>
+                              {g && <span style={styles.citaChipGestor}>Gestor: {g.nombre}</span>}
+                            </span>
                             {vendida && <Check size={11} color="#4F9B72" style={{ flexShrink: 0 }} />}
                           </button>
                         );
@@ -1212,6 +1360,7 @@ export default function AgendaVendedores() {
         <CitaModal
           modalCita={modalCita}
           vendedores={vendedores}
+          gestores={gestores}
           vendoresDisponibles={vendoresDisponibles}
           sugerirVendedor={sugerirVendedor}
           dias={DIAS}
@@ -1328,7 +1477,7 @@ function VendedorRow({ vendedor, citasCount, onRemove, onUpdateUbicacion }) {
 }
 
 // ---------- Modal de cita (crear / editar / cancelar / eliminar) ----------
-function CitaModal({ modalCita, vendedores, vendoresDisponibles, sugerirVendedor, dias, ventasParaTelefono, esVendida, onClose, onSave, onCancel, onDelete }) {
+function CitaModal({ modalCita, vendedores, gestores, vendoresDisponibles, sugerirVendedor, dias, ventasParaTelefono, esVendida, onClose, onSave, onCancel, onDelete }) {
   const isEdit = !!modalCita.existing;
   const existing = modalCita.existing;
   const day = isEdit ? existing.day : modalCita.day;
@@ -1339,6 +1488,7 @@ function CitaModal({ modalCita, vendedores, vendoresDisponibles, sugerirVendedor
   const sugerido = !isEdit ? sugerirVendedor(day, hour) : null;
 
   const [vendorId, setVendorId] = useState(isEdit ? existing.vendorId : sugerido?.id || disponibles[0]?.id || "");
+  const [gestorId, setGestorId] = useState(isEdit ? existing.gestorId || "" : "");
   const [cliente, setCliente] = useState(isEdit ? existing.cliente : "");
   const [telefono, setTelefono] = useState(isEdit ? existing.telefono || "" : "");
 
@@ -1411,6 +1561,20 @@ function CitaModal({ modalCita, vendedores, vendoresDisponibles, sugerirVendedor
         </div>
 
         <div style={styles.modalField}>
+          <label style={styles.modalLabel}>Gestor lead (quién generó la cita)</label>
+          {gestores.length === 0 ? (
+            <div style={styles.panelHint}>Aún no hay gestores lead creados. Puedes añadirlos en la pestaña "Gestores".</div>
+          ) : (
+            <select value={gestorId} onChange={(e) => setGestorId(e.target.value)} style={{ ...styles.select, width: "100%" }}>
+              <option value="">Sin gestor asignado</option>
+              {gestores.map((g) => (
+                <option key={g.id} value={g.id}>{g.nombre}</option>
+              ))}
+            </select>
+          )}
+        </div>
+
+        <div style={styles.modalField}>
           <label style={styles.modalLabel}>Cliente (opcional)</label>
           <input value={cliente} onChange={(e) => setCliente(e.target.value)} placeholder="Nombre del cliente" style={styles.input} />
         </div>
@@ -1457,7 +1621,7 @@ function CitaModal({ modalCita, vendedores, vendoresDisponibles, sugerirVendedor
           <button onClick={onClose} style={styles.secondaryBtn}>Cerrar</button>
           <button
             disabled={!vendorActual}
-            onClick={() => onSave(vendorId, day, hour, cliente, telefono, isEdit ? existing.id : null)}
+            onClick={() => onSave(vendorId, day, hour, cliente, telefono, isEdit ? existing.id : null, gestorId)}
             style={{ ...styles.primaryBtn, opacity: vendorActual ? 1 : 0.5 }}
           >
             <Check size={15} /> {isEdit ? (cancelada ? "Reactivar y guardar" : "Guardar cambios") : "Asignar cita"}
@@ -1566,6 +1730,8 @@ const styles = {
   citaChip: { display: "flex", alignItems: "center", gap: 5, border: "1px solid", borderRadius: 6, padding: "3px 6px", fontSize: 10.5, fontWeight: 600, textAlign: "left", overflow: "hidden" },
   citaDot: { width: 6, height: 6, borderRadius: "50%", flexShrink: 0 },
   citaChipText: { overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
+  citaChipTextWrap: { display: "flex", flexDirection: "column", overflow: "hidden", flex: 1, minWidth: 0 },
+  citaChipGestor: { fontSize: 9, fontWeight: 500, opacity: 0.75, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
 
   legend: { marginTop: 20, display: "flex", flexDirection: "column", gap: 7, maxWidth: 500 },
   legendItem: { display: "flex", alignItems: "center", gap: 8 },

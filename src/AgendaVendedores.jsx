@@ -27,6 +27,7 @@ import {
   Pencil,
   WifiOff,
   Wifi,
+  BarChart3,
 } from "lucide-react";
 import * as XLSX from "xlsx";
 
@@ -560,7 +561,12 @@ export default function AgendaVendedores() {
       const kPhone = findKey("telefono", "tel", "movil", "phone");
       const kDate = findKey("fecha");
       const kVendedor = findKey("vendedor", "comercial", "asesor");
-      const kCoche = findKey("matricula", "coche", "vehiculo", "modelo", "car");
+      const kCoche = findKey("matricula", "coche", "vehiculo", "car");
+      const kModelo = findKey("modelo", "model");
+      const kIsla = findKey("isla", "island");
+      const kSede = findKey("sede", "oficina", "delegacion", "branch");
+      const kCliente = findKey("cliente", "nombre", "customer", "client");
+      const kVendido = findKey("vendido", "venta", "sold", "estado");
 
       if (!kPhone) {
         setErrorArchivo("No he encontrado una columna de teléfono en el archivo.");
@@ -568,12 +574,26 @@ export default function AgendaVendedores() {
         return;
       }
 
+      const esVendidoTexto = (val) => {
+        if (val === true || val === 1) return true;
+        const s = String(val ?? "").trim().toLowerCase();
+        if (!s) return null; // sin dato: no afirmamos nada
+        if (["si", "sí", "vendido", "vendida", "yes", "true", "1", "x"].includes(s)) return true;
+        if (["no", "pendiente", "false", "0"].includes(s)) return false;
+        return null;
+      };
+
       const records = rows
         .map((r) => ({
           phone: normalizePhone(r[kPhone]),
           date: kDate ? parseAnyDate(r[kDate]) : null,
           vendedor: kVendedor ? String(r[kVendedor] || "").trim() : "",
           coche: kCoche ? String(r[kCoche] || "").trim() : "",
+          modelo: kModelo ? String(r[kModelo] || "").trim() : "",
+          isla: kIsla ? String(r[kIsla] || "").trim() : "",
+          sede: kSede ? String(r[kSede] || "").trim() : "",
+          cliente: kCliente ? String(r[kCliente] || "").trim() : "",
+          vendido: kVendido ? esVendidoTexto(r[kVendido]) : null,
         }))
         .filter((r) => r.phone);
 
@@ -608,6 +628,17 @@ export default function AgendaVendedores() {
     [ventas]
   );
 
+  // Determina si un conjunto de coincidencias de ventas representa una venta confirmada.
+  // Si el Excel trae una columna "vendido" con valor explícito, se respeta ese valor.
+  // Si no hay esa columna (listados antiguos sin ese dato), aparecer en el listado se
+  // sigue interpretando como venta, igual que antes.
+  const esVendida = useCallback((matches) => {
+    if (!matches || matches.length === 0) return false;
+    const conDatoExplicito = matches.filter((m) => m.vendido !== null && m.vendido !== undefined);
+    if (conDatoExplicito.length > 0) return conDatoExplicito.some((m) => m.vendido === true);
+    return true;
+  }, []);
+
   // ---------- Navegación semana ----------
   const goWeek = useCallback((delta) => {
     setWeekStart((prev) => addDays(prev, delta * 7));
@@ -623,10 +654,10 @@ export default function AgendaVendedores() {
     if (!ventas) return new Set();
     const ids = new Set();
     citasActivas.forEach((c) => {
-      if (c.telefono && ventasParaTelefono(c.telefono).length > 0) ids.add(c.id);
+      if (c.telefono && esVendida(ventasParaTelefono(c.telefono))) ids.add(c.id);
     });
     return ids;
-  }, [citasActivas, ventas, ventasParaTelefono]);
+  }, [citasActivas, ventas, ventasParaTelefono, esVendida]);
 
   const cargaPorVendedor = useMemo(() => {
     const map = {};
@@ -639,6 +670,53 @@ export default function AgendaVendedores() {
   const maxCarga = Math.max(1, ...Object.values(cargaPorVendedor));
   const minCarga = vendedores.length ? Math.min(...Object.values(cargaPorVendedor)) : 0;
   const desbalanceado = vendedores.length > 1 && maxCarga - minCarga >= 2;
+
+  // ---------- Resumen anual del listado de ventas ----------
+  const resumenVentas = useMemo(() => {
+    if (!ventas || !ventas.records || ventas.records.length === 0) return null;
+
+    const conDatoExplicito = (r) => r.vendido !== null && r.vendido !== undefined;
+    const esVendidaRecord = (r) => (conDatoExplicito(r) ? r.vendido === true : true);
+
+    const totalRegistros = ventas.records.length;
+    const vendidos = ventas.records.filter(esVendidaRecord);
+    const noVendidos = ventas.records.filter((r) => conDatoExplicito(r) && r.vendido === false);
+    const totalVendidos = vendidos.length;
+    const tasaConversion = totalRegistros > 0 ? Math.round((totalVendidos / totalRegistros) * 100) : 0;
+
+    const agrupar = (campo) => {
+      const map = {};
+      ventas.records.forEach((r) => {
+        const clave = (r[campo] || "Sin especificar").trim() || "Sin especificar";
+        if (!map[clave]) map[clave] = { total: 0, vendidos: 0 };
+        map[clave].total += 1;
+        if (esVendidaRecord(r)) map[clave].vendidos += 1;
+      });
+      return Object.entries(map)
+        .map(([nombre, datos]) => ({ nombre, ...datos }))
+        .sort((a, b) => b.vendidos - a.vendidos || b.total - a.total);
+    };
+
+    const porVendedor = agrupar("vendedor");
+    const porIsla = agrupar("isla");
+    const porModelo = agrupar("modelo");
+
+    const fechasValidas = ventas.records.map((r) => r.date).filter(Boolean);
+    const fechaMin = fechasValidas.length ? new Date(Math.min(...fechasValidas)) : null;
+    const fechaMax = fechasValidas.length ? new Date(Math.max(...fechasValidas)) : null;
+
+    return {
+      totalRegistros,
+      totalVendidos,
+      totalNoVendidos: noVendidos.length,
+      tasaConversion,
+      porVendedor,
+      porIsla,
+      porModelo,
+      fechaMin,
+      fechaMax,
+    };
+  }, [ventas]);
 
   if (loading) {
     return (
@@ -679,6 +757,9 @@ export default function AgendaVendedores() {
             </button>
             <button onClick={() => setVista("ventas")} style={vista === "ventas" ? styles.tabActive : styles.tab}>
               <CarFront size={15} /> Ventas
+            </button>
+            <button onClick={() => setVista("informe")} style={vista === "informe" ? styles.tabActive : styles.tab}>
+              <BarChart3 size={15} /> Informe
             </button>
           </div>
         </div>
@@ -950,24 +1031,32 @@ export default function AgendaVendedores() {
                     .map((c) => {
                       const v = vendedores.find((vv) => vv.id === c.vendorId);
                       const matches = ventasParaTelefono(c.telefono);
-                      const vendida = matches.length > 0;
+                      const vendida = esVendida(matches);
+                      const mejor = matches[0];
                       const colorV = v ? colorParaSede(v.isla, v.sede) : null;
                       return (
                         <div key={c.id} style={{ ...styles.cotejoRow, borderLeftColor: vendida ? "#4F9B72" : "#E5E0D4" }}>
                           <div style={{ ...styles.vendorDot, background: colorV?.border || "#ccc" }} />
                           <div style={{ flex: 1, minWidth: 0 }}>
                             <div style={styles.cotejoName}>
-                              {c.cliente || "Cliente sin nombre"} <span style={styles.cotejoPhone}>{c.telefono}</span>
+                              {c.cliente || mejor?.cliente || "Cliente sin nombre"} <span style={styles.cotejoPhone}>{c.telefono}</span>
                             </div>
                             <div style={styles.cotejoMeta}>
                               {DIAS[c.day]} {horaLabel(c.hour)} · {v?.nombre || "—"}
+                              {mejor?.isla ? ` · ${mejor.isla}` : ""}
+                              {mejor?.sede ? ` (${mejor.sede})` : ""}
                             </div>
                           </div>
-                          {vendida ? (
-                            <div style={styles.vendidaTag}>
-                              <Check size={12} /> Vendido{matches[0].coche ? ` · ${matches[0].coche}` : ""}
-                              {matches[0].date ? ` · ${fmtDateShort(matches[0].date)}` : ""}
-                            </div>
+                          {matches.length > 0 ? (
+                            vendida ? (
+                              <div style={styles.vendidaTag}>
+                                <Check size={12} /> Vendido
+                                {mejor?.modelo ? ` · ${mejor.modelo}` : mejor?.coche ? ` · ${mejor.coche}` : ""}
+                                {mejor?.date ? ` · ${fmtDateShort(mejor.date)}` : ""}
+                              </div>
+                            ) : (
+                              <div style={styles.pendienteTag}>No vendido{mejor?.date ? ` · ${fmtDateShort(mejor.date)}` : ""}</div>
+                            )
                           ) : (
                             <div style={styles.pendienteTag}>Sin venta registrada</div>
                           )}
@@ -976,6 +1065,54 @@ export default function AgendaVendedores() {
                     })}
                 </div>
               )}
+            </>
+          )}
+        </div>
+      )}
+
+      {vista === "informe" && (
+        <div style={styles.panel}>
+          <div style={styles.panelTitle}>Informe anual de ventas</div>
+          <div style={styles.panelHint}>
+            Resumen calculado a partir del listado de ventas cargado en la pestaña "Ventas".
+          </div>
+
+          {!resumenVentas ? (
+            <div style={styles.noVendorWarn}>
+              Aún no hay un listado de ventas cargado. Ve a la pestaña "Ventas" y sube tu Excel o CSV para ver aquí el informe.
+            </div>
+          ) : (
+            <>
+              {(resumenVentas.fechaMin || resumenVentas.fechaMax) && (
+                <div style={{ ...styles.panelHint, marginBottom: 18 }}>
+                  Periodo cubierto: {resumenVentas.fechaMin ? fmtDateShort(resumenVentas.fechaMin) : "?"} — {resumenVentas.fechaMax ? fmtDateShort(resumenVentas.fechaMax) : "?"}
+                </div>
+              )}
+
+              <div style={styles.informeStatsRow}>
+                <div style={styles.informeStatCard}>
+                  <div style={styles.informeStatNumber}>{resumenVentas.totalRegistros}</div>
+                  <div style={styles.informeStatLabel}>Registros totales</div>
+                </div>
+                <div style={{ ...styles.informeStatCard, borderColor: "#4F9B72" }}>
+                  <div style={{ ...styles.informeStatNumber, color: "#2F5E3F" }}>{resumenVentas.totalVendidos}</div>
+                  <div style={styles.informeStatLabel}>Vendidos</div>
+                </div>
+                {resumenVentas.totalNoVendidos > 0 && (
+                  <div style={styles.informeStatCard}>
+                    <div style={styles.informeStatNumber}>{resumenVentas.totalNoVendidos}</div>
+                    <div style={styles.informeStatLabel}>No vendidos</div>
+                  </div>
+                )}
+                <div style={styles.informeStatCard}>
+                  <div style={styles.informeStatNumber}>{resumenVentas.tasaConversion}%</div>
+                  <div style={styles.informeStatLabel}>Tasa de conversión</div>
+                </div>
+              </div>
+
+              <InformeTabla titulo="Por vendedor" filas={resumenVentas.porVendedor} />
+              <InformeTabla titulo="Por isla" filas={resumenVentas.porIsla} />
+              <InformeTabla titulo="Por modelo" filas={resumenVentas.porModelo} />
             </>
           )}
         </div>
@@ -1079,6 +1216,7 @@ export default function AgendaVendedores() {
           sugerirVendedor={sugerirVendedor}
           dias={DIAS}
           ventasParaTelefono={ventasParaTelefono}
+          esVendida={esVendida}
           onClose={() => setModalCita(null)}
           onSave={handleSaveCita}
           onCancel={handleCancelCita}
@@ -1093,6 +1231,38 @@ export default function AgendaVendedores() {
 
 function FragmentRow({ children }) {
   return <>{children}</>;
+}
+
+// ---------- Tabla de desglose para el informe anual ----------
+function InformeTabla({ titulo, filas }) {
+  if (!filas || filas.length === 0) return null;
+  const maxVendidos = Math.max(1, ...filas.map((f) => f.vendidos));
+  return (
+    <div style={styles.informeTablaWrap}>
+      <div style={styles.informeTablaTitulo}>{titulo}</div>
+      <div style={styles.informeTablaRows}>
+        {filas.map((f) => {
+          const tasa = f.total > 0 ? Math.round((f.vendidos / f.total) * 100) : 0;
+          return (
+            <div key={f.nombre} style={styles.informeTablaRow}>
+              <span style={styles.informeTablaNombre}>{f.nombre}</span>
+              <span style={styles.legendBarWrap}>
+                <span
+                  style={{
+                    ...styles.legendBar,
+                    width: `${Math.max(6, (f.vendidos / maxVendidos) * 100)}%`,
+                    background: "#4F9B72",
+                  }}
+                />
+              </span>
+              <span style={styles.informeTablaCifras}>{f.vendidos}/{f.total}</span>
+              <span style={styles.informeTablaTasa}>{tasa}%</span>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
 }
 
 // ---------- Fila de vendedor (con edición de isla/sede) ----------
@@ -1158,7 +1328,7 @@ function VendedorRow({ vendedor, citasCount, onRemove, onUpdateUbicacion }) {
 }
 
 // ---------- Modal de cita (crear / editar / cancelar / eliminar) ----------
-function CitaModal({ modalCita, vendedores, vendoresDisponibles, sugerirVendedor, dias, ventasParaTelefono, onClose, onSave, onCancel, onDelete }) {
+function CitaModal({ modalCita, vendedores, vendoresDisponibles, sugerirVendedor, dias, ventasParaTelefono, esVendida, onClose, onSave, onCancel, onDelete }) {
   const isEdit = !!modalCita.existing;
   const existing = modalCita.existing;
   const day = isEdit ? existing.day : modalCita.day;
@@ -1257,13 +1427,19 @@ function CitaModal({ modalCita, vendedores, vendoresDisponibles, sugerirVendedor
               inputMode="tel"
             />
           </div>
-          {matches.length > 0 && (
-            <div style={styles.vendidaInline}>
-              <Check size={13} /> Este teléfono ya aparece en el listado de ventas
-              {matches[0].coche ? ` · ${matches[0].coche}` : ""}
-              {matches[0].date ? ` · ${fmtDateShort(matches[0].date)}` : ""}
-            </div>
-          )}
+          {matches.length > 0 && (() => {
+            const mejor = matches[0];
+            const vendida = esVendida(matches);
+            return (
+              <div style={{ ...styles.vendidaInline, ...(vendida ? {} : { background: "#FBF1DE", color: "#8A5E10" }) }}>
+                <Check size={13} /> {vendida ? "Vendido" : "Registrado, sin venta"} según el listado
+                {mejor.modelo ? ` · ${mejor.modelo}` : mejor.coche ? ` · ${mejor.coche}` : ""}
+                {mejor.isla ? ` · ${mejor.isla}` : ""}
+                {mejor.sede ? ` (${mejor.sede})` : ""}
+                {mejor.date ? ` · ${fmtDateShort(mejor.date)}` : ""}
+              </div>
+            );
+          })()}
         </div>
 
         <div style={styles.modalActions}>
@@ -1398,6 +1574,19 @@ const styles = {
   legendBarWrap: { flex: 1, height: 7, background: "#F1EAD9", borderRadius: 4, overflow: "hidden" },
   legendBar: { display: "block", height: "100%", borderRadius: 4 },
   legendCount: { fontSize: 12, fontWeight: 600, width: 20, textAlign: "right", color: "#5C5240" },
+
+  informeStatsRow: { display: "flex", gap: 12, flexWrap: "wrap", marginBottom: 26 },
+  informeStatCard: { border: "1px solid #EBE4D3", borderRadius: 10, padding: "14px 18px", background: "#fff", minWidth: 120 },
+  informeStatNumber: { fontFamily: "var(--font-display)", fontSize: 24, fontWeight: 600, color: "#3D362A" },
+  informeStatLabel: { fontSize: 11.5, color: "#8A7B5C", marginTop: 2 },
+
+  informeTablaWrap: { marginBottom: 24, maxWidth: 560 },
+  informeTablaTitulo: { fontSize: 13.5, fontWeight: 600, marginBottom: 10, color: "#3D362A" },
+  informeTablaRows: { display: "flex", flexDirection: "column", gap: 7 },
+  informeTablaRow: { display: "flex", alignItems: "center", gap: 8 },
+  informeTablaNombre: { fontSize: 12, width: 130, flexShrink: 0, color: "#5C5240", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
+  informeTablaCifras: { fontSize: 12, fontWeight: 600, width: 48, textAlign: "right", color: "#5C5240", flexShrink: 0 },
+  informeTablaTasa: { fontSize: 11.5, width: 38, textAlign: "right", color: "#8A7B5C", flexShrink: 0 },
 
   modalOverlay: { position: "fixed", inset: 0, background: "rgba(43,38,32,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 50, padding: 16 },
   modalCard: { background: "#FBF8F2", borderRadius: 14, padding: 22, width: 380, maxWidth: "100%", boxShadow: "0 12px 32px rgba(0,0,0,0.18)", border: "1px solid #EBE4D3" },

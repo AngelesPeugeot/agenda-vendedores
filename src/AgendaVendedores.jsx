@@ -42,13 +42,13 @@ import * as XLSX from "xlsx";
 // algo como https://TU_PROYECTO-default-rtdb.europe-west1.firebasedatabase.app).
 // =====================================================================
 const firebaseConfig = {
-  apiKey: "AIzaSyDv5QkZZO-Dtz1IVdwBTAbXapoEeV5zW-A",
-  authDomain: "agenda-compartida-e2ade.firebaseapp.com",
-  databaseURL: "https://agenda-compartida-e2ade-default-rtdb.europe-west1.firebasedatabase.app",
-  projectId: "agenda-compartida-e2ade",
-  storageBucket: "agenda-compartida-e2ade.firebasestorage.app",
-  messagingSenderId: "918296486161",
-  appId: "1:918296486161:web:5ea610fdf576570b6facb0",
+  apiKey: "AIzaSyC9WndH7H0c5NRGSQzMrBYquF2sq-vPJVo",
+  authDomain: "agenda-vendedores-40cc8.firebaseapp.com",
+  databaseURL: "https://agenda-vendedores-40cc8-default-rtdb.europe-west1.firebasedatabase.app",
+  projectId: "agenda-vendedores-40cc8",
+  storageBucket: "agenda-vendedores-40cc8.firebasestorage.app",
+  messagingSenderId: "220024137396",
+  appId: "1:220024137396:web:e4529ac83e5526af4219e1",
 };
 
 let app, db, firebaseDisponible = false;

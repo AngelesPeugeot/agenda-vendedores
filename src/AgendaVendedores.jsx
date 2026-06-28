@@ -148,6 +148,37 @@ function fmtDateShort(d) {
   return d.toLocaleDateString("es-ES", { day: "2-digit", month: "2-digit", year: "2-digit" });
 }
 
+// Mes/año en formato "YYYY-MM", para guardar y filtrar a qué mes corresponde un lead sin cita
+// (independiente de la fecha en la que se haya dado de alta el registro en la app).
+function mesAnioActual() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+}
+
+const MESES_LABEL = [
+  "Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio",
+  "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre",
+];
+
+function mesAnioLabel(mesAnio) {
+  if (!mesAnio) return "Sin mes";
+  const [anio, mes] = mesAnio.split("-");
+  const idx = Number(mes) - 1;
+  if (Number.isNaN(idx) || idx < 0 || idx > 11) return mesAnio;
+  return `${MESES_LABEL[idx]} ${anio}`;
+}
+
+// Convierte el nombre de mes en español (tal como aparece en muchos Excel: "JUNIO", "Junio"...)
+// y el año, a formato "YYYY-MM". Devuelve "" si no se puede interpretar.
+function mesAnioDesdeExcel(anioVal, mesVal) {
+  const anio = String(anioVal || "").trim();
+  const mesTexto = String(mesVal || "").trim().toLowerCase();
+  if (!anio || !mesTexto) return "";
+  const idx = MESES_LABEL.findIndex((m) => m.toLowerCase() === mesTexto);
+  if (idx === -1) return "";
+  return `${anio}-${String(idx + 1).padStart(2, "0")}`;
+}
+
 function horaLabel(h) {
   return `${String(Math.floor(h)).padStart(2, "0")}:${h % 1 === 0 ? "00" : "30"}`;
 }
@@ -496,6 +527,7 @@ export default function AgendaVendedores() {
   const [nuevoLeadVendorId, setNuevoLeadVendorId] = useState("");
   const [nuevoLeadIsla, setNuevoLeadIsla] = useState("");
   const [nuevoLeadSede, setNuevoLeadSede] = useState("");
+  const [nuevoLeadMesAnio, setNuevoLeadMesAnio] = useState(mesAnioActual());
   const [toast, setToast] = useState(null);
   const [subiendoHistorico, setSubiendoHistorico] = useState(false);
   const [errorHistorico, setErrorHistorico] = useState(null);
@@ -505,6 +537,11 @@ export default function AgendaVendedores() {
   const fileInputCotejoRef = useRef(null);
   const [filtroIslas, setFiltroIslas] = useState([]);
   const [filtroSedes, setFiltroSedes] = useState([]);
+  const [leadBusqueda, setLeadBusqueda] = useState("");
+  const [leadFiltroEstado, setLeadFiltroEstado] = useState("todos");
+  const [leadFiltroGestorId, setLeadFiltroGestorId] = useState("");
+  const [leadFiltroIsla, setLeadFiltroIsla] = useState("");
+  const [leadFiltroMesAnio, setLeadFiltroMesAnio] = useState("");
 
   const showToast = useCallback((msg) => {
     setToast(msg);
@@ -568,6 +605,7 @@ export default function AgendaVendedores() {
       vendorId: nuevoLeadVendorId || "",
       isla: nuevoLeadIsla || "",
       sede: nuevoLeadSede || "",
+      mesAnio: nuevoLeadMesAnio || "",
       creadoEn: new Date().toISOString(),
       origen: "manual",
     };
@@ -578,8 +616,10 @@ export default function AgendaVendedores() {
     setNuevoLeadVendorId("");
     setNuevoLeadIsla("");
     setNuevoLeadSede("");
+    // El mes/año NO se resetea: si está añadiendo varios leads del mismo mes seguidos,
+    // no tiene que volver a seleccionarlo cada vez.
     showToast(`${cliente || "Lead"} añadido`);
-  }, [nuevoLeadCliente, nuevoLeadTelefono, nuevoLeadGestorId, nuevoLeadVendorId, nuevoLeadIsla, nuevoLeadSede, addLeadSinCita, showToast]);
+  }, [nuevoLeadCliente, nuevoLeadTelefono, nuevoLeadGestorId, nuevoLeadVendorId, nuevoLeadIsla, nuevoLeadSede, nuevoLeadMesAnio, addLeadSinCita, showToast]);
 
   const handleRemoveLeadSinCita = useCallback(
     async (id) => {
@@ -765,6 +805,8 @@ export default function AgendaVendedores() {
           const kSede = findKey("sede", "oficina", "delegacion", "branch");
           const kCliente = findKey("cliente", "nombre", "customer", "client");
           const kVendido = findKey("vendido", "venta", "sold", "estado", "cierre");
+          const kAnio = findKey("ao", "anyo", "year");
+          const kMes = findKey("mes", "month");
 
           if (!kPhone) {
             setError("No he encontrado una columna de teléfono en el archivo.");
@@ -798,18 +840,26 @@ export default function AgendaVendedores() {
             return null; // estados intermedios desconocidos (ej. "Presupuesto"): no afirmamos nada
           };
 
-          const filasLeidas = rows.map((r) => ({
-            phone: normalizePhone(r[kPhone]),
-            date: kDate ? parseAnyDate(r[kDate]) : null,
-            vendedor: kVendedor ? String(r[kVendedor] || "").trim() : "",
-            gestorLead: kGestorLead ? String(r[kGestorLead] || "").trim() : "",
-            coche: kCoche ? String(r[kCoche] || "").trim() : "",
-            modelo: kModelo ? String(r[kModelo] || "").trim() : "",
-            isla: kIsla ? normalizarIsla(r[kIsla]) : "",
-            sede: kSede ? String(r[kSede] || "").trim() : "",
-            cliente: kCliente ? String(r[kCliente] || "").trim() : "",
-            vendido: kVendido ? esVendidoTexto(r[kVendido]) : null,
-          }));
+          const filasLeidas = rows.map((r) => {
+            const fecha = kDate ? parseAnyDate(r[kDate]) : null;
+            let mesAnio = kAnio && kMes ? mesAnioDesdeExcel(r[kAnio], r[kMes]) : "";
+            if (!mesAnio && fecha) {
+              mesAnio = `${fecha.getFullYear()}-${String(fecha.getMonth() + 1).padStart(2, "0")}`;
+            }
+            return {
+              phone: normalizePhone(r[kPhone]),
+              date: fecha,
+              vendedor: kVendedor ? String(r[kVendedor] || "").trim() : "",
+              gestorLead: kGestorLead ? String(r[kGestorLead] || "").trim() : "",
+              coche: kCoche ? String(r[kCoche] || "").trim() : "",
+              modelo: kModelo ? String(r[kModelo] || "").trim() : "",
+              isla: kIsla ? normalizarIsla(r[kIsla]) : "",
+              sede: kSede ? String(r[kSede] || "").trim() : "",
+              cliente: kCliente ? String(r[kCliente] || "").trim() : "",
+              vendido: kVendido ? esVendidoTexto(r[kVendido]) : null,
+              mesAnio,
+            };
+          });
 
           const records = filasLeidas.filter((r) => r.phone);
 
@@ -835,6 +885,7 @@ export default function AgendaVendedores() {
                   vendorId: vendedorMatch?.id || "",
                   isla: r.isla || "",
                   sede: r.sede || "",
+                  mesAnio: r.mesAnio || "",
                   creadoEn: new Date().toISOString(),
                   origen: "excel",
                 };
@@ -958,6 +1009,44 @@ export default function AgendaVendedores() {
     });
     return ids;
   }, [leadsSinCita, hayVentasCargadas, ventasParaTelefono, esVendida]);
+
+  // Meses/años presentes en los leads sin cita, ordenados del más reciente al más antiguo,
+  // para rellenar el desplegable de filtro sin tener que escribirlos a mano.
+  const mesesDisponiblesLeads = useMemo(() => {
+    const set = new Set(leadsSinCita.map((l) => l.mesAnio).filter(Boolean));
+    return Array.from(set).sort().reverse();
+  }, [leadsSinCita]);
+
+  const leadsSinCitaFiltrados = useMemo(() => {
+    const busqueda = leadBusqueda.trim().toLowerCase();
+    return leadsSinCita.filter((l) => {
+      if (busqueda) {
+        const nombre = (l.cliente || "").toLowerCase();
+        const tel = (l.telefono || "").toLowerCase();
+        if (!nombre.includes(busqueda) && !tel.includes(busqueda)) return false;
+      }
+      if (leadFiltroGestorId && l.gestorId !== leadFiltroGestorId) return false;
+      if (leadFiltroIsla && l.isla !== leadFiltroIsla) return false;
+      if (leadFiltroMesAnio && l.mesAnio !== leadFiltroMesAnio) return false;
+      if (leadFiltroEstado !== "todos") {
+        const matches = ventasParaTelefono(l.telefono);
+        const estado = matches.length === 0 ? "sinregistro" : esVendida(matches) ? "vendido" : "novendido";
+        if (estado !== leadFiltroEstado) return false;
+      }
+      return true;
+    });
+  }, [leadsSinCita, leadBusqueda, leadFiltroGestorId, leadFiltroIsla, leadFiltroMesAnio, leadFiltroEstado, ventasParaTelefono, esVendida]);
+
+  const limpiarFiltrosLeads = useCallback(() => {
+    setLeadBusqueda("");
+    setLeadFiltroEstado("todos");
+    setLeadFiltroGestorId("");
+    setLeadFiltroIsla("");
+    setLeadFiltroMesAnio("");
+  }, []);
+
+  const hayFiltrosLeadsActivos =
+    leadBusqueda || leadFiltroEstado !== "todos" || leadFiltroGestorId || leadFiltroIsla || leadFiltroMesAnio;
 
   const cargaPorVendedor = useMemo(() => {
     const map = {};
@@ -1389,51 +1478,104 @@ export default function AgendaVendedores() {
                 ))}
               </select>
             )}
+            <input
+              type="month"
+              value={nuevoLeadMesAnio}
+              onChange={(e) => setNuevoLeadMesAnio(e.target.value)}
+              style={styles.select}
+              title="Mes al que corresponde este lead"
+            />
             <button onClick={handleAddLeadSinCita} style={styles.primaryBtn}>
               <Plus size={16} /> Añadir
             </button>
           </div>
 
+          {leadsSinCita.length > 0 && (
+            <div style={styles.leadFiltrosBar}>
+              <input
+                value={leadBusqueda}
+                onChange={(e) => setLeadBusqueda(e.target.value)}
+                placeholder="Buscar por nombre o teléfono…"
+                style={{ ...styles.input, maxWidth: 220 }}
+              />
+              <select value={leadFiltroEstado} onChange={(e) => setLeadFiltroEstado(e.target.value)} style={styles.selectSmall}>
+                <option value="todos">Todos los estados</option>
+                <option value="vendido">Vendido</option>
+                <option value="novendido">No vendido</option>
+                <option value="sinregistro">Sin venta registrada</option>
+              </select>
+              <select value={leadFiltroGestorId} onChange={(e) => setLeadFiltroGestorId(e.target.value)} style={styles.selectSmall}>
+                <option value="">Todos los gestores</option>
+                {gestores.map((g) => (
+                  <option key={g.id} value={g.id}>{g.nombre}</option>
+                ))}
+              </select>
+              <select value={leadFiltroIsla} onChange={(e) => setLeadFiltroIsla(e.target.value)} style={styles.selectSmall}>
+                <option value="">Todas las islas</option>
+                {ISLAS.map((isla) => (
+                  <option key={isla} value={isla}>{isla}</option>
+                ))}
+              </select>
+              <select value={leadFiltroMesAnio} onChange={(e) => setLeadFiltroMesAnio(e.target.value)} style={styles.selectSmall}>
+                <option value="">Todos los meses</option>
+                {mesesDisponiblesLeads.map((m) => (
+                  <option key={m} value={m}>{mesAnioLabel(m)}</option>
+                ))}
+              </select>
+              {hayFiltrosLeadsActivos && (
+                <button onClick={limpiarFiltrosLeads} style={styles.filterClear}>
+                  <X size={11} /> Limpiar
+                </button>
+              )}
+            </div>
+          )}
+
           <div style={styles.vendorList}>
             {leadsSinCita.length === 0 ? (
               <div style={styles.panelHint}>Aún no hay clientes sin cita añadidos.</div>
+            ) : leadsSinCitaFiltrados.length === 0 ? (
+              <div style={styles.panelHint}>Ningún cliente coincide con los filtros seleccionados.</div>
             ) : (
-              leadsSinCita.map((l) => {
-                const v = vendedores.find((vv) => vv.id === l.vendorId);
-                const g = gestores.find((gg) => gg.id === l.gestorId);
-                const vendido = leadsSinCitaConVenta.has(l.id);
-                const matches = ventasParaTelefono(l.telefono);
-                return (
-                  <div key={l.id} style={{ ...styles.cotejoRow, borderLeftColor: vendido ? "#4F9B72" : "#E5E0D4" }}>
-                    <div style={{ flex: 1, minWidth: 0 }}>
-                      <div style={styles.cotejoName}>
-                        {l.cliente || "Cliente sin nombre"} <span style={styles.cotejoPhone}>{l.telefono}</span>
-                      </div>
-                      <div style={styles.cotejoMeta}>
-                        {g?.nombre ? `Gestor: ${g.nombre}` : "Sin gestor"}
-                        {v?.nombre ? ` · ${v.nombre}` : " · Sin vendedor"}
-                        {l.isla ? ` · ${l.isla}` : ""}
-                        {l.sede ? ` (${l.sede})` : ""}
-                      </div>
-                    </div>
-                    {matches.length > 0 ? (
-                      vendido ? (
-                        <div style={styles.vendidaTag}>
-                          <Check size={12} /> Vendido
-                          {matches[0]?.modelo ? ` · ${matches[0].modelo}` : matches[0]?.coche ? ` · ${matches[0].coche}` : ""}
+              <>
+                <div style={styles.panelHint}>{leadsSinCitaFiltrados.length} de {leadsSinCita.length} clientes</div>
+                {leadsSinCitaFiltrados.map((l) => {
+                  const v = vendedores.find((vv) => vv.id === l.vendorId);
+                  const g = gestores.find((gg) => gg.id === l.gestorId);
+                  const vendido = leadsSinCitaConVenta.has(l.id);
+                  const matches = ventasParaTelefono(l.telefono);
+                  return (
+                    <div key={l.id} style={{ ...styles.cotejoRow, borderLeftColor: vendido ? "#4F9B72" : "#E5E0D4" }}>
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={styles.cotejoName}>
+                          {l.cliente || "Cliente sin nombre"} <span style={styles.cotejoPhone}>{l.telefono}</span>
                         </div>
+                        <div style={styles.cotejoMeta}>
+                          {g?.nombre ? `Gestor: ${g.nombre}` : "Sin gestor"}
+                          {v?.nombre ? ` · ${v.nombre}` : " · Sin vendedor"}
+                          {l.isla ? ` · ${l.isla}` : ""}
+                          {l.sede ? ` (${l.sede})` : ""}
+                          {l.mesAnio ? ` · ${mesAnioLabel(l.mesAnio)}` : ""}
+                        </div>
+                      </div>
+                      {matches.length > 0 ? (
+                        vendido ? (
+                          <div style={styles.vendidaTag}>
+                            <Check size={12} /> Vendido
+                            {matches[0]?.modelo ? ` · ${matches[0].modelo}` : matches[0]?.coche ? ` · ${matches[0].coche}` : ""}
+                          </div>
+                        ) : (
+                          <div style={styles.pendienteTag}>No vendido</div>
+                        )
                       ) : (
-                        <div style={styles.pendienteTag}>No vendido</div>
-                      )
-                    ) : (
-                      <div style={styles.pendienteTag}>Sin venta registrada</div>
-                    )}
-                    <button onClick={() => handleRemoveLeadSinCita(l.id)} style={styles.iconBtn} aria-label={`Eliminar ${l.cliente}`}>
-                      <Trash2 size={15} />
-                    </button>
-                  </div>
-                );
-              })
+                        <div style={styles.pendienteTag}>Sin venta registrada</div>
+                      )}
+                      <button onClick={() => handleRemoveLeadSinCita(l.id)} style={styles.iconBtn} aria-label={`Eliminar ${l.cliente}`}>
+                        <Trash2 size={15} />
+                      </button>
+                    </div>
+                  );
+                })}
+              </>
             )}
           </div>
         </div>
@@ -2104,6 +2246,7 @@ const styles = {
 
   addRow: { display: "flex", gap: 8, marginBottom: 18, maxWidth: 560, flexWrap: "wrap" },
   leadFormGrid: { display: "flex", gap: 8, marginBottom: 18, flexWrap: "wrap", maxWidth: 760, alignItems: "center" },
+  leadFiltrosBar: { display: "flex", gap: 8, marginBottom: 16, flexWrap: "wrap", alignItems: "center", paddingTop: 14, borderTop: "1px solid #EFE9DA" },
   input: { flex: 1, border: "1px solid #E5E0D4", borderRadius: 9, padding: "9px 12px", fontSize: 13.5, background: "#fff", color: "#2B2620", minWidth: 140 },
   select: { border: "1px solid #E5E0D4", borderRadius: 9, padding: "9px 10px", fontSize: 13, background: "#fff", color: "#2B2620", minWidth: 120 },
   selectSmall: { border: "1px solid #E5E0D4", borderRadius: 7, padding: "5px 7px", fontSize: 12, background: "#fff", color: "#2B2620" },

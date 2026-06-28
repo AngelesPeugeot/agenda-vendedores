@@ -189,7 +189,8 @@ function addDays(date, n) {
 //   gestores/{id}               -> {nombre}  (gestor lead: crea la cita, distinto del vendedor)
 //   turnos/{weekKey}_{vendorId} -> {weekKey, vendorId, dias: {0:[...],...}}
 //   citas/{id}                  -> {weekKey, vendorId, gestorId, day, hour, cliente, telefono}
-//   ventas/listado               -> {fileName, uploadedAt, records}
+//   ventas/historico             -> {fileName, uploadedAt, records}  (se sube una vez, KPIs anuales)
+//   ventas/cotejo                 -> {fileName, uploadedAt, records}  (se sube a menudo, cotejo en vivo)
 // =====================================================================
 
 function useVendedoresSync() {
@@ -368,29 +369,36 @@ function useCitasSync(weekKey) {
   return { citas, addCita, updateCita, removeCita };
 }
 
-function useVentasSync() {
+// tipo: "historico" (se sube una vez, alimenta los KPIs del informe anual) o
+// "cotejo" (se sube/reemplaza con frecuencia, alimenta el cotejo en vivo de la agenda).
+// Cada tipo vive en su propia ruta de Firebase, independiente del otro.
+function useVentasSync(tipo) {
   const [ventas, setVentas] = useState(null);
+  const path = `ventas/${tipo}`;
 
   useEffect(() => {
     if (!firebaseDisponible) return;
-    const ventasRef = ref(db, "ventas/listado");
+    const ventasRef = ref(db, path);
     const unsub = onValue(ventasRef, (snap) => {
       setVentas(snap.exists() ? snap.val() : null);
-    }, (err) => console.error("Error sincronizando ventas", err));
+    }, (err) => console.error(`Error sincronizando ventas (${tipo})`, err));
     return () => unsub();
-  }, []);
+  }, [path, tipo]);
 
-  const guardarVentas = useCallback(async (data) => {
-    if (!firebaseDisponible) {
-      setVentas(data);
-      return;
-    }
-    if (data === null) {
-      await remove(ref(db, "ventas/listado"));
-    } else {
-      await set(ref(db, "ventas/listado"), data);
-    }
-  }, []);
+  const guardarVentas = useCallback(
+    async (data) => {
+      if (!firebaseDisponible) {
+        setVentas(data);
+        return;
+      }
+      if (data === null) {
+        await remove(ref(db, path));
+      } else {
+        await set(ref(db, path), data);
+      }
+    },
+    [path]
+  );
 
   return { ventas, guardarVentas };
 }
@@ -404,7 +412,8 @@ export default function AgendaVendedores() {
   const { gestores, loadingGestores, addGestor, removeGestor } = useGestoresSync();
   const { turnos, setTurnoVendorDia } = useTurnosSync(weekKey);
   const { citas, addCita, updateCita, removeCita } = useCitasSync(weekKey);
-  const { ventas, guardarVentas } = useVentasSync();
+  const { ventas: ventasHistorico, guardarVentas: guardarVentasHistorico } = useVentasSync("historico");
+  const { ventas: ventasCotejo, guardarVentas: guardarVentasCotejo } = useVentasSync("cotejo");
 
   const [vista, setVista] = useState("agenda");
   const [modalCita, setModalCita] = useState(null);
@@ -413,9 +422,12 @@ export default function AgendaVendedores() {
   const [nuevoVendedorSede, setNuevoVendedorSede] = useState((ISLAS_SEDES[ISLAS[0]] || [])[0] || "");
   const [nuevoGestorNombre, setNuevoGestorNombre] = useState("");
   const [toast, setToast] = useState(null);
-  const [subiendoArchivo, setSubiendoArchivo] = useState(false);
-  const [errorArchivo, setErrorArchivo] = useState(null);
-  const fileInputRef = useRef(null);
+  const [subiendoHistorico, setSubiendoHistorico] = useState(false);
+  const [errorHistorico, setErrorHistorico] = useState(null);
+  const fileInputHistoricoRef = useRef(null);
+  const [subiendoCotejo, setSubiendoCotejo] = useState(false);
+  const [errorCotejo, setErrorCotejo] = useState(null);
+  const fileInputCotejoRef = useRef(null);
   const [filtroIslas, setFiltroIslas] = useState([]);
   const [filtroSedes, setFiltroSedes] = useState([]);
 
@@ -606,126 +618,162 @@ export default function AgendaVendedores() {
     [removeCita, showToast]
   );
 
-  // ---------- Listado de ventas ----------
-  const handleFileUpload = useCallback(async (file) => {
-    if (!file) return;
-    setSubiendoArchivo(true);
-    setErrorArchivo(null);
-    try {
-      const buf = await file.arrayBuffer();
-      const wb = XLSX.read(buf, { type: "array", cellDates: true });
-      const sheet = wb.Sheets[wb.SheetNames[0]];
-      const rows = XLSX.utils.sheet_to_json(sheet, { defval: "" });
+  // ---------- Listado de ventas (histórico anual + cotejo en vivo, independientes) ----------
+  // Construye el manejador de subida para un slot concreto ("historico" o "cotejo"),
+  // reutilizando la misma lógica de lectura y detección de columnas para ambos.
+  const crearHandleFileUpload = useCallback(
+    (guardarFn, setSubiendo, setError) =>
+      async (file) => {
+        if (!file) return;
+        setSubiendo(true);
+        setError(null);
+        try {
+          const buf = await file.arrayBuffer();
+          const wb = XLSX.read(buf, { type: "array", cellDates: true });
+          const sheet = wb.Sheets[wb.SheetNames[0]];
+          const rows = XLSX.utils.sheet_to_json(sheet, { defval: "" });
 
-      if (rows.length === 0) {
-        setErrorArchivo("El archivo no tiene filas con datos.");
-        setSubiendoArchivo(false);
-        return;
-      }
+          if (rows.length === 0) {
+            setError("El archivo no tiene filas con datos.");
+            setSubiendo(false);
+            return;
+          }
 
-      const keys = Object.keys(rows[0]);
-      const findKey = (...patterns) =>
-        keys.find((k) => patterns.some((p) => k.toLowerCase().replace(/[^a-z0-9]/g, "").includes(p)));
+          const keys = Object.keys(rows[0]);
+          const findKey = (...patterns) =>
+            keys.find((k) => patterns.some((p) => k.toLowerCase().replace(/[^a-z0-9]/g, "").includes(p)));
 
-      const kPhone = findKey("telefono", "tel", "movil", "phone");
-      const kDate = findKey("fecha");
-      const kVendedor = findKey("vendedor", "comercial", "asesor");
-      const kGestorLead = findKey("gestor", "lead", "captador");
-      const kCoche = findKey("matricula", "coche", "vehiculo", "car");
-      const kModelo = findKey("modelo", "model");
-      const kIsla = findKey("isla", "island", "provincia");
-      const kSede = findKey("sede", "oficina", "delegacion", "branch");
-      const kCliente = findKey("cliente", "nombre", "customer", "client");
-      const kVendido = findKey("vendido", "venta", "sold", "estado", "cierre");
+          const kPhone = findKey("telefono", "tel", "movil", "phone");
+          const kDate = findKey("fecha");
+          const kVendedor = findKey("vendedor", "comercial", "asesor");
+          const kGestorLead = findKey("gestor", "lead", "captador");
+          const kCoche = findKey("matricula", "coche", "vehiculo", "car");
+          const kModelo = findKey("modelo", "model");
+          const kIsla = findKey("isla", "island", "provincia");
+          const kSede = findKey("sede", "oficina", "delegacion", "branch");
+          const kCliente = findKey("cliente", "nombre", "customer", "client");
+          const kVendido = findKey("vendido", "venta", "sold", "estado", "cierre");
 
-      if (!kPhone) {
-        setErrorArchivo("No he encontrado una columna de teléfono en el archivo.");
-        setSubiendoArchivo(false);
-        return;
-      }
+          if (!kPhone) {
+            setError("No he encontrado una columna de teléfono en el archivo.");
+            setSubiendo(false);
+            return;
+          }
 
-      // Algunos listados usan siglas de provincia en vez del nombre completo de la isla.
-      const SIGLAS_ISLA = {
-        tf: "Tenerife",
-        gc: "Gran Canaria",
-        lz: "Lanzarote",
-        fv: "Fuerteventura",
-        lp: "La Palma",
-      };
-      const normalizarIsla = (val) => {
-        const s = String(val ?? "").trim();
-        if (!s) return "";
-        const sigla = SIGLAS_ISLA[s.toLowerCase()];
-        return sigla || s;
-      };
+          // Algunos listados usan siglas de provincia en vez del nombre completo de la isla.
+          const SIGLAS_ISLA = {
+            tf: "Tenerife",
+            gc: "Gran Canaria",
+            lz: "Lanzarote",
+            fv: "Fuerteventura",
+            lp: "La Palma",
+          };
+          const normalizarIsla = (val) => {
+            const s = String(val ?? "").trim();
+            if (!s) return "";
+            const sigla = SIGLAS_ISLA[s.toLowerCase()];
+            return sigla || s;
+          };
 
-      // Estados que cuentan como venta confirmada (p.ej. "Vendido", "Pedido" = reserva en curso).
-      // Vacío o estados intermedios (p.ej. "Presupuesto") se consideran "sin decidir todavía".
-      const esVendidoTexto = (val) => {
-        if (val === true || val === 1) return true;
-        const s = String(val ?? "").trim().toLowerCase();
-        if (!s) return null; // sin dato: no afirmamos nada
-        if (["si", "sí", "vendido", "vendida", "pedido", "yes", "true", "1", "x"].includes(s)) return true;
-        if (["no", "perdido", "perdida", "cancelado", "cancelada", "no interesa", "pendiente", "false", "0"].includes(s)) return false;
-        return null; // estados intermedios desconocidos (ej. "Presupuesto"): no afirmamos nada
-      };
+          // Estados que cuentan como venta confirmada (p.ej. "Vendido", "Pedido" = reserva en curso).
+          // Vacío o estados intermedios (p.ej. "Presupuesto") se consideran "sin decidir todavía".
+          const esVendidoTexto = (val) => {
+            if (val === true || val === 1) return true;
+            const s = String(val ?? "").trim().toLowerCase();
+            if (!s) return null; // sin dato: no afirmamos nada
+            if (["si", "sí", "vendido", "vendida", "pedido", "yes", "true", "1", "x"].includes(s)) return true;
+            if (["no", "perdido", "perdida", "cancelado", "cancelada", "no interesa", "pendiente", "false", "0"].includes(s)) return false;
+            return null; // estados intermedios desconocidos (ej. "Presupuesto"): no afirmamos nada
+          };
 
-      const records = rows
-        .map((r) => ({
-          phone: normalizePhone(r[kPhone]),
-          date: kDate ? parseAnyDate(r[kDate]) : null,
-          vendedor: kVendedor ? String(r[kVendedor] || "").trim() : "",
-          gestorLead: kGestorLead ? String(r[kGestorLead] || "").trim() : "",
-          coche: kCoche ? String(r[kCoche] || "").trim() : "",
-          modelo: kModelo ? String(r[kModelo] || "").trim() : "",
-          isla: kIsla ? normalizarIsla(r[kIsla]) : "",
-          sede: kSede ? String(r[kSede] || "").trim() : "",
-          cliente: kCliente ? String(r[kCliente] || "").trim() : "",
-          vendido: kVendido ? esVendidoTexto(r[kVendido]) : null,
-        }))
-        .filter((r) => r.phone);
+          const records = rows
+            .map((r) => ({
+              phone: normalizePhone(r[kPhone]),
+              date: kDate ? parseAnyDate(r[kDate]) : null,
+              vendedor: kVendedor ? String(r[kVendedor] || "").trim() : "",
+              gestorLead: kGestorLead ? String(r[kGestorLead] || "").trim() : "",
+              coche: kCoche ? String(r[kCoche] || "").trim() : "",
+              modelo: kModelo ? String(r[kModelo] || "").trim() : "",
+              isla: kIsla ? normalizarIsla(r[kIsla]) : "",
+              sede: kSede ? String(r[kSede] || "").trim() : "",
+              cliente: kCliente ? String(r[kCliente] || "").trim() : "",
+              vendido: kVendido ? esVendidoTexto(r[kVendido]) : null,
+            }))
+            .filter((r) => r.phone);
 
-      const data = {
-        fileName: file.name,
-        uploadedAt: new Date().toISOString(),
-        totalFilas: rows.length,
-        records,
-      };
-      await guardarVentas(data);
-      showToast(`Listado cargado: ${records.length} ventas con teléfono válido`);
-    } catch (e) {
-      console.error(e);
-      setErrorArchivo("No he podido leer el archivo. Comprueba que sea un .xlsx o .csv válido.");
-    } finally {
-      setSubiendoArchivo(false);
-    }
-  }, [guardarVentas, showToast]);
+          const data = {
+            fileName: file.name,
+            uploadedAt: new Date().toISOString(),
+            totalFilas: rows.length,
+            records,
+          };
+          await guardarFn(data);
+          showToast(`Listado cargado: ${records.length} ventas con teléfono válido`);
+        } catch (e) {
+          console.error(e);
+          setError("No he podido leer el archivo. Comprueba que sea un .xlsx o .csv válido.");
+        } finally {
+          setSubiendo(false);
+        }
+      },
+    [showToast]
+  );
 
-  const removeVentas = useCallback(async () => {
-    await guardarVentas(null);
-    showToast("Listado de ventas eliminado");
-  }, [guardarVentas, showToast]);
+  const handleFileUploadHistorico = useCallback(
+    (file) => crearHandleFileUpload(guardarVentasHistorico, setSubiendoHistorico, setErrorHistorico)(file),
+    [crearHandleFileUpload, guardarVentasHistorico]
+  );
+  const handleFileUploadCotejo = useCallback(
+    (file) => crearHandleFileUpload(guardarVentasCotejo, setSubiendoCotejo, setErrorCotejo)(file),
+    [crearHandleFileUpload, guardarVentasCotejo]
+  );
+
+  const removeVentasHistorico = useCallback(async () => {
+    await guardarVentasHistorico(null);
+    showToast("Listado histórico eliminado");
+  }, [guardarVentasHistorico, showToast]);
+
+  const removeVentasCotejo = useCallback(async () => {
+    await guardarVentasCotejo(null);
+    showToast("Listado de cotejo eliminado");
+  }, [guardarVentasCotejo, showToast]);
+
+  // Combina los registros de ambos listados (histórico anual + cotejo en vivo) en uno solo,
+  // para que el cotejo de teléfonos y los KPIs del informe tengan en cuenta toda la información
+  // disponible, sin importar en qué pestaña se cargó cada listado.
+  const todosLosRegistros = useMemo(() => {
+    const a = ventasHistorico?.records || [];
+    const b = ventasCotejo?.records || [];
+    return [...a, ...b];
+  }, [ventasHistorico, ventasCotejo]);
+
+  const hayVentasCargadas = (ventasHistorico?.records?.length || 0) > 0 || (ventasCotejo?.records?.length || 0) > 0;
 
   const ventasParaTelefono = useCallback(
     (phone) => {
-      if (!ventas || !phone) return [];
+      if (!phone || todosLosRegistros.length === 0) return [];
       const norm = normalizePhone(phone);
       if (!norm) return [];
-      return ventas.records.filter((r) => r.phone === norm);
+      return todosLosRegistros.filter((r) => r.phone === norm);
     },
-    [ventas]
+    [todosLosRegistros]
   );
 
   // Determina si un conjunto de coincidencias de ventas representa una venta confirmada.
-  // Si el Excel trae una columna "vendido" con valor explícito, se respeta ese valor.
-  // Si no hay esa columna (listados antiguos sin ese dato), aparecer en el listado se
-  // sigue interpretando como venta, igual que antes.
-  const esVendida = useCallback((matches) => {
-    if (!matches || matches.length === 0) return false;
-    const conDatoExplicito = matches.filter((m) => m.vendido !== null && m.vendido !== undefined);
-    if (conDatoExplicito.length > 0) return conDatoExplicito.some((m) => m.vendido === true);
-    return true;
-  }, []);
+  // Si el conjunto combinado de listados trae una columna de estado (CIERRE/vendido) con
+  // al menos un valor explícito en alguna fila, se asume que esa columna existe de verdad:
+  // una coincidencia sin ese dato entonces cuenta como "sin decidir todavía", no como venta.
+  // Solo si ningún listado tiene esa columna (listados antiguos) se usa el respaldo de
+  // "aparecer en el listado = venta".
+  const esVendida = useCallback(
+    (matches) => {
+      if (!matches || matches.length === 0) return false;
+      const columnaEstadoExiste = todosLosRegistros.some((r) => r.vendido !== null && r.vendido !== undefined);
+      if (!columnaEstadoExiste) return true;
+      return matches.some((m) => m.vendido === true);
+    },
+    [todosLosRegistros]
+  );
 
   // ---------- Navegación semana ----------
   const goWeek = useCallback((delta) => {
@@ -739,13 +787,13 @@ export default function AgendaVendedores() {
   const totalCitasSemana = citasActivas.length;
 
   const citasConVenta = useMemo(() => {
-    if (!ventas) return new Set();
+    if (!hayVentasCargadas) return new Set();
     const ids = new Set();
     citasActivas.forEach((c) => {
       if (c.telefono && esVendida(ventasParaTelefono(c.telefono))) ids.add(c.id);
     });
     return ids;
-  }, [citasActivas, ventas, ventasParaTelefono, esVendida]);
+  }, [citasActivas, hayVentasCargadas, ventasParaTelefono, esVendida]);
 
   const cargaPorVendedor = useMemo(() => {
     const map = {};
@@ -768,22 +816,45 @@ export default function AgendaVendedores() {
     return map;
   }, [gestores, citasActivas]);
 
-  // ---------- Resumen anual del listado de ventas ----------
+  // ---------- Resumen anual del listado de ventas (histórico + cotejo combinados) ----------
   const resumenVentas = useMemo(() => {
-    if (!ventas || !ventas.records || ventas.records.length === 0) return null;
+    if (todosLosRegistros.length === 0) return null;
+
+    // Si el mismo teléfono aparece en ambos listados (p.ej. una cita del histórico que luego
+    // se vuelve a ver en un cotejo posterior), evitamos contarla dos veces en los KPIs.
+    // Nos quedamos con un registro por teléfono, priorizando el que confirme una venta.
+    const porTelefono = new Map();
+    todosLosRegistros.forEach((r) => {
+      if (!r.phone) return;
+      const previo = porTelefono.get(r.phone);
+      if (!previo) {
+        porTelefono.set(r.phone, r);
+      } else if (previo.vendido !== true && r.vendido === true) {
+        porTelefono.set(r.phone, r);
+      }
+    });
+    const registrosUnicos = Array.from(porTelefono.values());
 
     const conDatoExplicito = (r) => r.vendido !== null && r.vendido !== undefined;
-    const esVendidaRecord = (r) => (conDatoExplicito(r) ? r.vendido === true : true);
+    // Si el conjunto combinado trae la columna de estado (CIERRE/vendido) con al menos un
+    // valor explícito, asumimos que esa columna existe de verdad: una fila vacía entonces
+    // significa "aún sin decidir", no "vendido". Solo si NINGUNA fila trae ese dato (listados
+    // antiguos sin columna de estado) usamos el respaldo de "aparecer en el listado = vendido".
+    const columnaEstadoExiste = registrosUnicos.some(conDatoExplicito);
+    const esVendidaRecord = (r) =>
+      columnaEstadoExiste ? r.vendido === true : true;
 
-    const totalRegistros = ventas.records.length;
-    const vendidos = ventas.records.filter(esVendidaRecord);
-    const noVendidos = ventas.records.filter((r) => conDatoExplicito(r) && r.vendido === false);
+    const totalRegistros = registrosUnicos.length;
+    const vendidos = registrosUnicos.filter(esVendidaRecord);
+    const noVendidos = columnaEstadoExiste
+      ? registrosUnicos.filter((r) => r.vendido === false)
+      : [];
     const totalVendidos = vendidos.length;
     const tasaConversion = totalRegistros > 0 ? Math.round((totalVendidos / totalRegistros) * 100) : 0;
 
     const agrupar = (campo) => {
       const map = {};
-      ventas.records.forEach((r) => {
+      registrosUnicos.forEach((r) => {
         const clave = (r[campo] || "Sin especificar").trim() || "Sin especificar";
         if (!map[clave]) map[clave] = { total: 0, vendidos: 0 };
         map[clave].total += 1;
@@ -799,7 +870,7 @@ export default function AgendaVendedores() {
     const porIsla = agrupar("isla");
     const porModelo = agrupar("modelo");
 
-    const fechasValidas = ventas.records.map((r) => r.date).filter(Boolean);
+    const fechasValidas = registrosUnicos.map((r) => r.date).filter(Boolean);
     const fechaMin = fechasValidas.length ? new Date(Math.min(...fechasValidas)) : null;
     const fechaMax = fechasValidas.length ? new Date(Math.max(...fechasValidas)) : null;
 
@@ -815,7 +886,7 @@ export default function AgendaVendedores() {
       fechaMin,
       fechaMax,
     };
-  }, [ventas]);
+  }, [todosLosRegistros]);
 
   if (loading) {
     return (
@@ -890,7 +961,7 @@ export default function AgendaVendedores() {
                 </span>
               )}
               <span style={styles.balanceCount}>{totalCitasSemana} citas esta semana</span>
-              {ventas && (
+              {hayVentasCargadas && (
                 <span style={styles.balanceSold}>
                   <CarFront size={12} /> {citasConVenta.size} vendidas
                 </span>
@@ -1120,47 +1191,83 @@ export default function AgendaVendedores() {
 
       {vendedores.length >= 0 && vista === "ventas" && (
         <div style={styles.panel}>
-          <div style={styles.panelTitle}>Listado de ventas</div>
+          <div style={styles.panelTitle}>Listado histórico (KPIs del año)</div>
           <div style={styles.panelHint}>
-            Sube el Excel o CSV de ventas (teléfono, fecha, vendedor, matrícula/coche) para cruzarlo automáticamente con los teléfonos de tus citas.
+            Súbelo una sola vez con todas las citas del año en curso. Alimenta el informe anual de KPIs. No hace falta volver a subirlo salvo que quieras añadir más datos.
           </div>
 
           <input
-            ref={fileInputRef}
+            ref={fileInputHistoricoRef}
             type="file"
             accept=".xlsx,.xls,.csv"
             style={{ display: "none" }}
-            onChange={(e) => handleFileUpload(e.target.files?.[0])}
+            onChange={(e) => handleFileUploadHistorico(e.target.files?.[0])}
           />
 
-          {!ventas ? (
-            <button onClick={() => fileInputRef.current?.click()} disabled={subiendoArchivo} style={styles.uploadBox}>
+          {!ventasHistorico ? (
+            <button onClick={() => fileInputHistoricoRef.current?.click()} disabled={subiendoHistorico} style={styles.uploadBox}>
               <Upload size={22} color="#A8835A" />
-              <div style={styles.uploadTitle}>{subiendoArchivo ? "Leyendo archivo…" : "Subir archivo de ventas"}</div>
+              <div style={styles.uploadTitle}>{subiendoHistorico ? "Leyendo archivo…" : "Subir listado histórico"}</div>
               <div style={styles.uploadHint}>Excel (.xlsx) o CSV</div>
             </button>
           ) : (
             <div style={styles.fileCard}>
               <FileSpreadsheet size={20} color="#4F9B72" />
               <div style={{ flex: 1 }}>
-                <div style={styles.fileName}>{ventas.fileName}</div>
+                <div style={styles.fileName}>{ventasHistorico.fileName}</div>
                 <div style={styles.fileMeta}>
-                  {ventas.records.length} ventas con teléfono válido · subido el{" "}
-                  {new Date(ventas.uploadedAt).toLocaleDateString("es-ES")}
+                  {ventasHistorico.records.length} citas con teléfono válido · subido el{" "}
+                  {new Date(ventasHistorico.uploadedAt).toLocaleDateString("es-ES")}
                 </div>
               </div>
-              <button onClick={() => fileInputRef.current?.click()} style={styles.secondaryBtn}>Reemplazar</button>
-              <button onClick={removeVentas} style={styles.iconBtn} aria-label="Eliminar listado">
+              <button onClick={() => fileInputHistoricoRef.current?.click()} style={styles.secondaryBtn}>Reemplazar</button>
+              <button onClick={removeVentasHistorico} style={styles.iconBtn} aria-label="Eliminar listado histórico">
                 <Trash2 size={15} />
               </button>
             </div>
           )}
+          {errorHistorico && <div style={styles.noVendorWarn}>{errorHistorico}</div>}
 
-          {errorArchivo && <div style={styles.noVendorWarn}>{errorArchivo}</div>}
+          <div style={{ ...styles.panelTitle, marginTop: 30 }}>Listado de cotejo (ventas recientes)</div>
+          <div style={styles.panelHint}>
+            Súbelo cada vez que quieras comprobar si las citas de la agenda ya se han convertido en venta. Al subir uno nuevo, reemplaza solo a este listado — el histórico no se ve afectado.
+          </div>
 
-          {ventas && (
+          <input
+            ref={fileInputCotejoRef}
+            type="file"
+            accept=".xlsx,.xls,.csv"
+            style={{ display: "none" }}
+            onChange={(e) => handleFileUploadCotejo(e.target.files?.[0])}
+          />
+
+          {!ventasCotejo ? (
+            <button onClick={() => fileInputCotejoRef.current?.click()} disabled={subiendoCotejo} style={styles.uploadBox}>
+              <Upload size={22} color="#A8835A" />
+              <div style={styles.uploadTitle}>{subiendoCotejo ? "Leyendo archivo…" : "Subir listado de cotejo"}</div>
+              <div style={styles.uploadHint}>Excel (.xlsx) o CSV</div>
+            </button>
+          ) : (
+            <div style={styles.fileCard}>
+              <FileSpreadsheet size={20} color="#4F9B72" />
+              <div style={{ flex: 1 }}>
+                <div style={styles.fileName}>{ventasCotejo.fileName}</div>
+                <div style={styles.fileMeta}>
+                  {ventasCotejo.records.length} ventas con teléfono válido · subido el{" "}
+                  {new Date(ventasCotejo.uploadedAt).toLocaleDateString("es-ES")}
+                </div>
+              </div>
+              <button onClick={() => fileInputCotejoRef.current?.click()} style={styles.secondaryBtn}>Reemplazar</button>
+              <button onClick={removeVentasCotejo} style={styles.iconBtn} aria-label="Eliminar listado de cotejo">
+                <Trash2 size={15} />
+              </button>
+            </div>
+          )}
+          {errorCotejo && <div style={styles.noVendorWarn}>{errorCotejo}</div>}
+
+          {hayVentasCargadas && (
             <>
-              <div style={{ ...styles.panelTitle, marginTop: 26, fontSize: 15 }}>
+              <div style={{ ...styles.panelTitle, marginTop: 30, fontSize: 15 }}>
                 Cotejo de citas con teléfono — semana actual
               </div>
               {citasActivas.filter((c) => c.telefono).length === 0 ? (
@@ -1217,12 +1324,12 @@ export default function AgendaVendedores() {
         <div style={styles.panel}>
           <div style={styles.panelTitle}>Informe anual de ventas</div>
           <div style={styles.panelHint}>
-            Resumen calculado a partir del listado de ventas cargado en la pestaña "Ventas".
+            Resumen calculado a partir del listado histórico y del listado de cotejo, cargados en la pestaña "Ventas".
           </div>
 
           {!resumenVentas ? (
             <div style={styles.noVendorWarn}>
-              Aún no hay un listado de ventas cargado. Ve a la pestaña "Ventas" y sube tu Excel o CSV para ver aquí el informe.
+              Aún no hay ningún listado cargado. Ve a la pestaña "Ventas" y sube tu Excel o CSV para ver aquí el informe.
             </div>
           ) : (
             <>

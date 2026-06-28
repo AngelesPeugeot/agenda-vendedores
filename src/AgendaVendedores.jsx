@@ -32,6 +32,18 @@ import {
   UserPlus,
 } from "lucide-react";
 import * as XLSX from "xlsx";
+import {
+  BarChart,
+  Bar,
+  LineChart,
+  Line,
+  XAxis,
+  YAxis,
+  CartesianGrid,
+  Tooltip,
+  Legend,
+  ResponsiveContainer,
+} from "recharts";
 
 // =====================================================================
 // CONFIGURACIÓN DE FIREBASE (Realtime Database)
@@ -1086,6 +1098,7 @@ export default function AgendaVendedores() {
       return {
         phone: normalizePhone(l.telefono),
         date: l.creadoEn ? new Date(l.creadoEn) : null,
+        mesAnio: l.mesAnio || "",
         vendedor: v?.nombre || "",
         gestorLead: g?.nombre || "",
         coche: "",
@@ -1098,10 +1111,11 @@ export default function AgendaVendedores() {
     });
   }, [leadsSinCita, vendedores, gestores, ventasParaTelefono, todosLosRegistros]);
 
-  // ---------- Resumen anual del listado de ventas (histórico + cotejo + leads sin cita) ----------
-  const resumenVentas = useMemo(() => {
+  // ---------- Datos combinados y deduplicados (histórico + cotejo + leads sin cita) ----------
+  // Esto se calcula una sola vez, independientemente de los filtros del informe.
+  const registrosUnicosCombinados = useMemo(() => {
     const registrosCombinados = [...todosLosRegistros, ...registrosDeLeadsSinCita];
-    if (registrosCombinados.length === 0) return null;
+    if (registrosCombinados.length === 0) return [];
 
     // Si el mismo teléfono aparece en varios orígenes (p.ej. una cita del histórico que luego
     // se vuelve a ver en un cotejo posterior, o un lead sin cita que coincide con una fila del
@@ -1120,20 +1134,81 @@ export default function AgendaVendedores() {
     // Los leads sin cita sin teléfono (puede pasar, ya que solo el nombre es obligatorio)
     // no se pueden cotejar por teléfono, pero igualmente deben contar en el informe.
     const sinTelefono = registrosCombinados.filter((r) => !r.phone);
-    const registrosUnicos = [...Array.from(porTelefono.values()), ...sinTelefono];
+    return [...Array.from(porTelefono.values()), ...sinTelefono];
+  }, [todosLosRegistros, registrosDeLeadsSinCita]);
 
-    const conDatoExplicito = (r) => r.vendido !== null && r.vendido !== undefined;
-    // Si el conjunto combinado trae la columna de estado (CIERRE/vendido) con al menos un
-    // valor explícito, asumimos que esa columna existe de verdad: una fila vacía entonces
-    // significa "aún sin decidir", no "vendido". Solo si NINGUNA fila trae ese dato (listados
-    // antiguos sin columna de estado) usamos el respaldo de "aparecer en el listado = vendido".
-    const columnaEstadoExiste = registrosUnicos.some(conDatoExplicito);
-    const esVendidaRecord = (r) =>
-      columnaEstadoExiste ? r.vendido === true : true;
+  // Si el conjunto combinado trae la columna de estado (CIERRE/vendido) con al menos un valor
+  // explícito, asumimos que esa columna existe de verdad: una fila vacía entonces significa
+  // "aún sin decidir", no "vendido". Solo si NINGUNA fila trae ese dato (listados antiguos sin
+  // columna de estado) usamos el respaldo de "aparecer en el listado = vendido".
+  const columnaEstadoExisteGlobal = useMemo(
+    () => registrosUnicosCombinados.some((r) => r.vendido !== null && r.vendido !== undefined),
+    [registrosUnicosCombinados]
+  );
+  const esVendidaRecordGlobal = useCallback(
+    (r) => (columnaEstadoExisteGlobal ? r.vendido === true : true),
+    [columnaEstadoExisteGlobal]
+  );
 
+  // Meses/años disponibles en todo el conjunto, para rellenar el filtro de mes del informe.
+  const mesesDisponiblesInforme = useMemo(() => {
+    const set = new Set(registrosUnicosCombinados.map((r) => r.mesAnio).filter(Boolean));
+    return Array.from(set).sort().reverse();
+  }, [registrosUnicosCombinados]);
+
+  // Nombres de gestor y vendedor presentes en los datos combinados (no solo en las listas
+  // actuales de Gestores/Vendedores, por si el Excel trae nombres que aún no se han creado).
+  const gestoresDisponiblesInforme = useMemo(() => {
+    const set = new Set(registrosUnicosCombinados.map((r) => r.gestorLead).filter(Boolean));
+    return Array.from(set).sort();
+  }, [registrosUnicosCombinados]);
+  const vendedoresDisponiblesInforme = useMemo(() => {
+    const set = new Set(registrosUnicosCombinados.map((r) => r.vendedor).filter(Boolean));
+    return Array.from(set).sort();
+  }, [registrosUnicosCombinados]);
+
+  // ---------- Filtros del informe ----------
+  const [informeFiltroMesAnio, setInformeFiltroMesAnio] = useState("");
+  const [informeFiltroDesde, setInformeFiltroDesde] = useState("");
+  const [informeFiltroHasta, setInformeFiltroHasta] = useState("");
+  const [informeFiltroGestor, setInformeFiltroGestor] = useState("");
+  const [informeFiltroVendedor, setInformeFiltroVendedor] = useState("");
+
+  const hayFiltrosInformeActivos =
+    informeFiltroMesAnio || informeFiltroDesde || informeFiltroHasta || informeFiltroGestor || informeFiltroVendedor;
+
+  const limpiarFiltrosInforme = useCallback(() => {
+    setInformeFiltroMesAnio("");
+    setInformeFiltroDesde("");
+    setInformeFiltroHasta("");
+    setInformeFiltroGestor("");
+    setInformeFiltroVendedor("");
+  }, []);
+
+  const registrosFiltradosInforme = useMemo(() => {
+    return registrosUnicosCombinados.filter((r) => {
+      if (informeFiltroMesAnio && r.mesAnio !== informeFiltroMesAnio) return false;
+      if (informeFiltroDesde && (!r.date || r.date < new Date(informeFiltroDesde))) return false;
+      if (informeFiltroHasta) {
+        const hasta = new Date(informeFiltroHasta);
+        hasta.setHours(23, 59, 59, 999);
+        if (!r.date || r.date > hasta) return false;
+      }
+      if (informeFiltroGestor && r.gestorLead !== informeFiltroGestor) return false;
+      if (informeFiltroVendedor && r.vendedor !== informeFiltroVendedor) return false;
+      return true;
+    });
+  }, [registrosUnicosCombinados, informeFiltroMesAnio, informeFiltroDesde, informeFiltroHasta, informeFiltroGestor, informeFiltroVendedor]);
+
+  // ---------- Resumen del informe (sobre los registros ya filtrados) ----------
+  const resumenVentas = useMemo(() => {
+    const registrosUnicos = registrosFiltradosInforme;
+    if (registrosUnicos.length === 0) return null;
+
+    const esVendidaRecord = esVendidaRecordGlobal;
     const totalRegistros = registrosUnicos.length;
     const vendidos = registrosUnicos.filter(esVendidaRecord);
-    const noVendidos = columnaEstadoExiste
+    const noVendidos = columnaEstadoExisteGlobal
       ? registrosUnicos.filter((r) => r.vendido === false)
       : [];
     const totalVendidos = vendidos.length;
@@ -1157,6 +1232,19 @@ export default function AgendaVendedores() {
     const porIsla = agrupar("isla");
     const porModelo = agrupar("modelo");
 
+    // Serie mensual: ventas y total de leads/citas por mes, ordenada cronológicamente,
+    // para alimentar el gráfico de tendencia.
+    const porMesMap = {};
+    registrosUnicos.forEach((r) => {
+      const clave = r.mesAnio || "Sin mes";
+      if (!porMesMap[clave]) porMesMap[clave] = { total: 0, vendidos: 0 };
+      porMesMap[clave].total += 1;
+      if (esVendidaRecord(r)) porMesMap[clave].vendidos += 1;
+    });
+    const porMes = Object.entries(porMesMap)
+      .map(([mesAnio, datos]) => ({ mesAnio, label: mesAnioLabel(mesAnio), ...datos }))
+      .sort((a, b) => (a.mesAnio === "Sin mes" ? 1 : b.mesAnio === "Sin mes" ? -1 : a.mesAnio.localeCompare(b.mesAnio)));
+
     const fechasValidas = registrosUnicos.map((r) => r.date).filter(Boolean);
     const fechaMin = fechasValidas.length ? new Date(Math.min(...fechasValidas)) : null;
     const fechaMax = fechasValidas.length ? new Date(Math.max(...fechasValidas)) : null;
@@ -1170,10 +1258,11 @@ export default function AgendaVendedores() {
       porGestorLead,
       porIsla,
       porModelo,
+      porMes,
       fechaMin,
       fechaMax,
     };
-  }, [todosLosRegistros, registrosDeLeadsSinCita]);
+  }, [registrosFiltradosInforme, esVendidaRecordGlobal, columnaEstadoExisteGlobal]);
 
   if (loading) {
     return (
@@ -1774,46 +1863,109 @@ export default function AgendaVendedores() {
         <div style={styles.panel}>
           <div style={styles.panelTitle}>Informe anual de ventas</div>
           <div style={styles.panelHint}>
-            Resumen calculado a partir del listado histórico y del listado de cotejo, cargados en la pestaña "Ventas".
+            Resumen calculado a partir del listado histórico, del listado de cotejo y de los clientes sin cita.
           </div>
 
-          {!resumenVentas ? (
+          {registrosUnicosCombinados.length === 0 ? (
             <div style={styles.noVendorWarn}>
               Aún no hay ningún listado cargado. Ve a la pestaña "Ventas" y sube tu Excel o CSV para ver aquí el informe.
             </div>
           ) : (
             <>
-              {(resumenVentas.fechaMin || resumenVentas.fechaMax) && (
-                <div style={{ ...styles.panelHint, marginBottom: 18 }}>
-                  Periodo cubierto: {resumenVentas.fechaMin ? fmtDateShort(resumenVentas.fechaMin) : "?"} — {resumenVentas.fechaMax ? fmtDateShort(resumenVentas.fechaMax) : "?"}
-                </div>
-              )}
-
-              <div style={styles.informeStatsRow}>
-                <div style={styles.informeStatCard}>
-                  <div style={styles.informeStatNumber}>{resumenVentas.totalRegistros}</div>
-                  <div style={styles.informeStatLabel}>Registros totales</div>
-                </div>
-                <div style={{ ...styles.informeStatCard, borderColor: "#4F9B72" }}>
-                  <div style={{ ...styles.informeStatNumber, color: "#2F5E3F" }}>{resumenVentas.totalVendidos}</div>
-                  <div style={styles.informeStatLabel}>Vendidos</div>
-                </div>
-                {resumenVentas.totalNoVendidos > 0 && (
-                  <div style={styles.informeStatCard}>
-                    <div style={styles.informeStatNumber}>{resumenVentas.totalNoVendidos}</div>
-                    <div style={styles.informeStatLabel}>No vendidos</div>
-                  </div>
+              <div style={styles.leadFiltrosBar}>
+                <select value={informeFiltroMesAnio} onChange={(e) => setInformeFiltroMesAnio(e.target.value)} style={styles.selectSmall}>
+                  <option value="">Todos los meses</option>
+                  {mesesDisponiblesInforme.map((m) => (
+                    <option key={m} value={m}>{mesAnioLabel(m)}</option>
+                  ))}
+                </select>
+                <span style={styles.informeFiltroLabel}>Desde</span>
+                <input
+                  type="date"
+                  value={informeFiltroDesde}
+                  onChange={(e) => setInformeFiltroDesde(e.target.value)}
+                  style={styles.selectSmall}
+                />
+                <span style={styles.informeFiltroLabel}>Hasta</span>
+                <input
+                  type="date"
+                  value={informeFiltroHasta}
+                  onChange={(e) => setInformeFiltroHasta(e.target.value)}
+                  style={styles.selectSmall}
+                />
+                <select value={informeFiltroGestor} onChange={(e) => setInformeFiltroGestor(e.target.value)} style={styles.selectSmall}>
+                  <option value="">Todos los gestores</option>
+                  {gestoresDisponiblesInforme.map((g) => (
+                    <option key={g} value={g}>{g}</option>
+                  ))}
+                </select>
+                <select value={informeFiltroVendedor} onChange={(e) => setInformeFiltroVendedor(e.target.value)} style={styles.selectSmall}>
+                  <option value="">Todos los vendedores</option>
+                  {vendedoresDisponiblesInforme.map((v) => (
+                    <option key={v} value={v}>{v}</option>
+                  ))}
+                </select>
+                {hayFiltrosInformeActivos && (
+                  <button onClick={limpiarFiltrosInforme} style={styles.filterClear}>
+                    <X size={11} /> Limpiar
+                  </button>
                 )}
-                <div style={styles.informeStatCard}>
-                  <div style={styles.informeStatNumber}>{resumenVentas.tasaConversion}%</div>
-                  <div style={styles.informeStatLabel}>Tasa de conversión</div>
-                </div>
               </div>
 
-              <InformeTabla titulo="Por vendedor" filas={resumenVentas.porVendedor} />
-              <InformeTabla titulo="Por gestor lead" filas={resumenVentas.porGestorLead} />
-              <InformeTabla titulo="Por isla" filas={resumenVentas.porIsla} />
-              <InformeTabla titulo="Por modelo" filas={resumenVentas.porModelo} />
+              {!resumenVentas ? (
+                <div style={styles.noVendorWarn}>Ningún registro coincide con los filtros seleccionados.</div>
+              ) : (
+                <>
+                  {(resumenVentas.fechaMin || resumenVentas.fechaMax) && (
+                    <div style={{ ...styles.panelHint, marginBottom: 18 }}>
+                      Periodo cubierto: {resumenVentas.fechaMin ? fmtDateShort(resumenVentas.fechaMin) : "?"} — {resumenVentas.fechaMax ? fmtDateShort(resumenVentas.fechaMax) : "?"}
+                    </div>
+                  )}
+
+                  <div style={styles.informeStatsRow}>
+                    <div style={styles.informeStatCard}>
+                      <div style={styles.informeStatNumber}>{resumenVentas.totalRegistros}</div>
+                      <div style={styles.informeStatLabel}>Registros totales</div>
+                    </div>
+                    <div style={{ ...styles.informeStatCard, borderColor: "#4F9B72" }}>
+                      <div style={{ ...styles.informeStatNumber, color: "#2F5E3F" }}>{resumenVentas.totalVendidos}</div>
+                      <div style={styles.informeStatLabel}>Vendidos</div>
+                    </div>
+                    {resumenVentas.totalNoVendidos > 0 && (
+                      <div style={styles.informeStatCard}>
+                        <div style={styles.informeStatNumber}>{resumenVentas.totalNoVendidos}</div>
+                        <div style={styles.informeStatLabel}>No vendidos</div>
+                      </div>
+                    )}
+                    <div style={styles.informeStatCard}>
+                      <div style={styles.informeStatNumber}>{resumenVentas.tasaConversion}%</div>
+                      <div style={styles.informeStatLabel}>Tasa de conversión</div>
+                    </div>
+                  </div>
+
+                  {resumenVentas.porMes.length > 1 && (
+                    <div style={styles.informeChartWrap}>
+                      <div style={styles.informeTablaTitulo}>Ventas por mes</div>
+                      <ResponsiveContainer width="100%" height={260}>
+                        <BarChart data={resumenVentas.porMes} margin={{ top: 10, right: 10, left: -10, bottom: 0 }}>
+                          <CartesianGrid strokeDasharray="3 3" stroke="#EFE9DA" />
+                          <XAxis dataKey="label" tick={{ fontSize: 11, fill: "#8A7B5C" }} />
+                          <YAxis tick={{ fontSize: 11, fill: "#8A7B5C" }} allowDecimals={false} />
+                          <Tooltip contentStyle={{ fontSize: 12, borderRadius: 8, border: "1px solid #EBE4D3" }} />
+                          <Legend wrapperStyle={{ fontSize: 12 }} />
+                          <Bar dataKey="total" name="Registros" fill="#D8CFB8" radius={[4, 4, 0, 0]} />
+                          <Bar dataKey="vendidos" name="Vendidos" fill="#4F9B72" radius={[4, 4, 0, 0]} />
+                        </BarChart>
+                      </ResponsiveContainer>
+                    </div>
+                  )}
+
+                  <InformeTabla titulo="Por vendedor" filas={resumenVentas.porVendedor} />
+                  <InformeTabla titulo="Por gestor lead" filas={resumenVentas.porGestorLead} />
+                  <InformeTabla titulo="Por isla" filas={resumenVentas.porIsla} />
+                  <InformeTabla titulo="Por modelo" filas={resumenVentas.porModelo} />
+                </>
+              )}
             </>
           )}
         </div>
@@ -2307,6 +2459,8 @@ const styles = {
 
   informeTablaWrap: { marginBottom: 24, maxWidth: 560 },
   informeTablaTitulo: { fontSize: 13.5, fontWeight: 600, marginBottom: 10, color: "#3D362A" },
+  informeFiltroLabel: { fontSize: 12, color: "#8A7B5C", fontWeight: 500 },
+  informeChartWrap: { background: "#fff", border: "1px solid #EBE4D3", borderRadius: 10, padding: "16px 18px", marginBottom: 26, maxWidth: 700 },
   informeTablaRows: { display: "flex", flexDirection: "column", gap: 7 },
   informeTablaRow: { display: "flex", alignItems: "center", gap: 8 },
   informeTablaNombre: { fontSize: 12, width: 130, flexShrink: 0, color: "#5C5240", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },

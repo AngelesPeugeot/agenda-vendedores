@@ -29,6 +29,7 @@ import {
   Wifi,
   BarChart3,
   UserCog,
+  UserPlus,
 } from "lucide-react";
 import * as XLSX from "xlsx";
 
@@ -187,6 +188,7 @@ function addDays(date, n) {
 // Estructura de colecciones:
 //   vendedores/{id}            -> {nombre, isla, sede}
 //   gestores/{id}               -> {nombre}  (gestor lead: crea la cita, distinto del vendedor)
+//   leadsSinCita/{id}            -> {cliente, telefono, gestorId, vendorId, isla, sede, creadoEn}
 //   turnos/{weekKey}_{vendorId} -> {weekKey, vendorId, dias: {0:[...],...}}
 //   citas/{id}                  -> {weekKey, vendorId, gestorId, day, hour, cliente, telefono}
 //   ventas/historico             -> {fileName, uploadedAt, records}  (se sube una vez, KPIs anuales)
@@ -287,6 +289,72 @@ function useGestoresSync() {
   }, []);
 
   return { gestores, loadingGestores, addGestor, removeGestor };
+}
+
+// Leads sin cita: clientes que reciben presupuesto o se derivan directamente a un vendedor
+// (p.ej. empresas), sin pasar por una cita en la agenda. Se guardan de forma permanente
+// (no por semana) para poder cotejarlos igual que una cita cuando se sube un listado de ventas.
+function useLeadsSinCitaSync() {
+  const [leadsSinCita, setLeadsSinCita] = useState([]);
+  const [loadingLeads, setLoadingLeads] = useState(true);
+
+  useEffect(() => {
+    if (!firebaseDisponible) {
+      setLoadingLeads(false);
+      return;
+    }
+    const leadsRef = ref(db, "leadsSinCita");
+    const unsub = onValue(leadsRef, (snap) => {
+      const data = snap.val() || {};
+      const list = Object.entries(data).map(([id, l]) => ({ id, ...l }));
+      setLeadsSinCita(list);
+      setLoadingLeads(false);
+    }, (err) => {
+      console.error("Error sincronizando leads sin cita", err);
+      setLoadingLeads(false);
+    });
+    return () => unsub();
+  }, []);
+
+  const addLeadSinCita = useCallback(async (lead) => {
+    if (!firebaseDisponible) {
+      setLeadsSinCita((prev) => [...prev, lead]);
+      return;
+    }
+    const { id, ...resto } = lead;
+    await set(ref(db, `leadsSinCita/${id}`), resto);
+  }, []);
+
+  const addLeadsSinCitaEnLote = useCallback(async (leads) => {
+    if (!firebaseDisponible) {
+      setLeadsSinCita((prev) => [...prev, ...leads]);
+      return;
+    }
+    const updates = {};
+    leads.forEach((lead) => {
+      const { id, ...resto } = lead;
+      updates[`leadsSinCita/${id}`] = resto;
+    });
+    await update(ref(db), updates);
+  }, []);
+
+  const updateLeadSinCita = useCallback(async (id, fields) => {
+    if (!firebaseDisponible) {
+      setLeadsSinCita((prev) => prev.map((l) => (l.id === id ? { ...l, ...fields } : l)));
+      return;
+    }
+    await update(ref(db, `leadsSinCita/${id}`), fields);
+  }, []);
+
+  const removeLeadSinCita = useCallback(async (id) => {
+    if (!firebaseDisponible) {
+      setLeadsSinCita((prev) => prev.filter((l) => l.id !== id));
+      return;
+    }
+    await remove(ref(db, `leadsSinCita/${id}`));
+  }, []);
+
+  return { leadsSinCita, loadingLeads, addLeadSinCita, addLeadsSinCitaEnLote, updateLeadSinCita, removeLeadSinCita };
 }
 
 function useTurnosSync(weekKey) {
@@ -410,6 +478,7 @@ export default function AgendaVendedores() {
 
   const { vendedores, loading, addVendedor, removeVendedor, updateVendedor } = useVendedoresSync();
   const { gestores, loadingGestores, addGestor, removeGestor } = useGestoresSync();
+  const { leadsSinCita, addLeadSinCita, addLeadsSinCitaEnLote, updateLeadSinCita, removeLeadSinCita } = useLeadsSinCitaSync();
   const { turnos, setTurnoVendorDia } = useTurnosSync(weekKey);
   const { citas, addCita, updateCita, removeCita } = useCitasSync(weekKey);
   const { ventas: ventasHistorico, guardarVentas: guardarVentasHistorico } = useVentasSync("historico");
@@ -421,6 +490,12 @@ export default function AgendaVendedores() {
   const [nuevoVendedorIsla, setNuevoVendedorIsla] = useState(ISLAS[0]);
   const [nuevoVendedorSede, setNuevoVendedorSede] = useState((ISLAS_SEDES[ISLAS[0]] || [])[0] || "");
   const [nuevoGestorNombre, setNuevoGestorNombre] = useState("");
+  const [nuevoLeadCliente, setNuevoLeadCliente] = useState("");
+  const [nuevoLeadTelefono, setNuevoLeadTelefono] = useState("");
+  const [nuevoLeadGestorId, setNuevoLeadGestorId] = useState("");
+  const [nuevoLeadVendorId, setNuevoLeadVendorId] = useState("");
+  const [nuevoLeadIsla, setNuevoLeadIsla] = useState("");
+  const [nuevoLeadSede, setNuevoLeadSede] = useState("");
   const [toast, setToast] = useState(null);
   const [subiendoHistorico, setSubiendoHistorico] = useState(false);
   const [errorHistorico, setErrorHistorico] = useState(null);
@@ -478,6 +553,40 @@ export default function AgendaVendedores() {
       // sin gestor asociado (gestorId apunta a un id que ya no existe en la lista).
     },
     [gestores, removeGestor, showToast]
+  );
+
+  // ---------- Leads sin cita (presupuesto / derivados directamente a vendedor) ----------
+  const handleAddLeadSinCita = useCallback(async () => {
+    const cliente = nuevoLeadCliente.trim();
+    const telefono = nuevoLeadTelefono.trim();
+    if (!cliente && !telefono) return;
+    const nuevo = {
+      id: genId(),
+      cliente,
+      telefono,
+      gestorId: nuevoLeadGestorId || "",
+      vendorId: nuevoLeadVendorId || "",
+      isla: nuevoLeadIsla || "",
+      sede: nuevoLeadSede || "",
+      creadoEn: new Date().toISOString(),
+      origen: "manual",
+    };
+    await addLeadSinCita(nuevo);
+    setNuevoLeadCliente("");
+    setNuevoLeadTelefono("");
+    setNuevoLeadGestorId("");
+    setNuevoLeadVendorId("");
+    setNuevoLeadIsla("");
+    setNuevoLeadSede("");
+    showToast(`${cliente || "Lead"} añadido`);
+  }, [nuevoLeadCliente, nuevoLeadTelefono, nuevoLeadGestorId, nuevoLeadVendorId, nuevoLeadIsla, nuevoLeadSede, addLeadSinCita, showToast]);
+
+  const handleRemoveLeadSinCita = useCallback(
+    async (id) => {
+      await removeLeadSinCita(id);
+      showToast("Lead eliminado");
+    },
+    [removeLeadSinCita, showToast]
   );
 
   const vendedoresFiltrados = useMemo(() => {
@@ -621,8 +730,11 @@ export default function AgendaVendedores() {
   // ---------- Listado de ventas (histórico anual + cotejo en vivo, independientes) ----------
   // Construye el manejador de subida para un slot concreto ("historico" o "cotejo"),
   // reutilizando la misma lógica de lectura y detección de columnas para ambos.
+  // Si crearLeadsAutomaticos es true (solo se usa para el histórico), las filas sin fecha de
+  // cita se interpretan como "leads sin cita" (presupuesto / derivado directo a vendedor) y se
+  // crean automáticamente en esa lista, emparejando vendedor y gestor lead por nombre si existen.
   const crearHandleFileUpload = useCallback(
-    (guardarFn, setSubiendo, setError) =>
+    (guardarFn, setSubiendo, setError, crearLeadsAutomaticos) =>
       async (file) => {
         if (!file) return;
         setSubiendo(true);
@@ -686,20 +798,59 @@ export default function AgendaVendedores() {
             return null; // estados intermedios desconocidos (ej. "Presupuesto"): no afirmamos nada
           };
 
-          const records = rows
-            .map((r) => ({
-              phone: normalizePhone(r[kPhone]),
-              date: kDate ? parseAnyDate(r[kDate]) : null,
-              vendedor: kVendedor ? String(r[kVendedor] || "").trim() : "",
-              gestorLead: kGestorLead ? String(r[kGestorLead] || "").trim() : "",
-              coche: kCoche ? String(r[kCoche] || "").trim() : "",
-              modelo: kModelo ? String(r[kModelo] || "").trim() : "",
-              isla: kIsla ? normalizarIsla(r[kIsla]) : "",
-              sede: kSede ? String(r[kSede] || "").trim() : "",
-              cliente: kCliente ? String(r[kCliente] || "").trim() : "",
-              vendido: kVendido ? esVendidoTexto(r[kVendido]) : null,
-            }))
-            .filter((r) => r.phone);
+          const filasLeidas = rows.map((r) => ({
+            phone: normalizePhone(r[kPhone]),
+            date: kDate ? parseAnyDate(r[kDate]) : null,
+            vendedor: kVendedor ? String(r[kVendedor] || "").trim() : "",
+            gestorLead: kGestorLead ? String(r[kGestorLead] || "").trim() : "",
+            coche: kCoche ? String(r[kCoche] || "").trim() : "",
+            modelo: kModelo ? String(r[kModelo] || "").trim() : "",
+            isla: kIsla ? normalizarIsla(r[kIsla]) : "",
+            sede: kSede ? String(r[kSede] || "").trim() : "",
+            cliente: kCliente ? String(r[kCliente] || "").trim() : "",
+            vendido: kVendido ? esVendidoTexto(r[kVendido]) : null,
+          }));
+
+          const records = filasLeidas.filter((r) => r.phone);
+
+          let leadsCreados = 0;
+          if (crearLeadsAutomaticos) {
+            // Filas sin fecha de cita = lead sin cita (presupuesto / derivado directo).
+            // Se ignoran las que ya existan (mismo teléfono) para no duplicar al reemplazar el archivo.
+            const sinFecha = records.filter((r) => !r.date);
+            const telefonosExistentes = new Set(
+              leadsSinCita.map((l) => normalizePhone(l.telefono)).filter(Boolean)
+            );
+            const normalizaNombre = (s) => String(s || "").trim().toLowerCase();
+            const nuevosLeads = sinFecha
+              .filter((r) => !telefonosExistentes.has(r.phone))
+              .map((r) => {
+                const vendedorMatch = vendedores.find((v) => normalizaNombre(v.nombre) === normalizaNombre(r.vendedor));
+                const gestorMatch = gestores.find((g) => normalizaNombre(g.nombre) === normalizaNombre(r.gestorLead));
+                return {
+                  id: genId(),
+                  cliente: r.cliente || "",
+                  telefono: r.phone || "",
+                  gestorId: gestorMatch?.id || "",
+                  vendorId: vendedorMatch?.id || "",
+                  isla: r.isla || "",
+                  sede: r.sede || "",
+                  creadoEn: new Date().toISOString(),
+                  origen: "excel",
+                };
+              });
+            // Evita duplicados también dentro del propio archivo si el mismo teléfono se repite.
+            const vistos = new Set();
+            const nuevosLeadsUnicos = nuevosLeads.filter((l) => {
+              if (!l.telefono || vistos.has(l.telefono)) return !l.telefono;
+              vistos.add(l.telefono);
+              return true;
+            });
+            if (nuevosLeadsUnicos.length > 0) {
+              await addLeadsSinCitaEnLote(nuevosLeadsUnicos);
+              leadsCreados = nuevosLeadsUnicos.length;
+            }
+          }
 
           const data = {
             fileName: file.name,
@@ -708,7 +859,11 @@ export default function AgendaVendedores() {
             records,
           };
           await guardarFn(data);
-          showToast(`Listado cargado: ${records.length} ventas con teléfono válido`);
+          showToast(
+            leadsCreados > 0
+              ? `Listado cargado: ${records.length} filas · ${leadsCreados} clientes sin cita añadidos`
+              : `Listado cargado: ${records.length} ventas con teléfono válido`
+          );
         } catch (e) {
           console.error(e);
           setError("No he podido leer el archivo. Comprueba que sea un .xlsx o .csv válido.");
@@ -716,15 +871,15 @@ export default function AgendaVendedores() {
           setSubiendo(false);
         }
       },
-    [showToast]
+    [showToast, leadsSinCita, vendedores, gestores, addLeadsSinCitaEnLote]
   );
 
   const handleFileUploadHistorico = useCallback(
-    (file) => crearHandleFileUpload(guardarVentasHistorico, setSubiendoHistorico, setErrorHistorico)(file),
+    (file) => crearHandleFileUpload(guardarVentasHistorico, setSubiendoHistorico, setErrorHistorico, true)(file),
     [crearHandleFileUpload, guardarVentasHistorico]
   );
   const handleFileUploadCotejo = useCallback(
-    (file) => crearHandleFileUpload(guardarVentasCotejo, setSubiendoCotejo, setErrorCotejo)(file),
+    (file) => crearHandleFileUpload(guardarVentasCotejo, setSubiendoCotejo, setErrorCotejo, false)(file),
     [crearHandleFileUpload, guardarVentasCotejo]
   );
 
@@ -795,6 +950,15 @@ export default function AgendaVendedores() {
     return ids;
   }, [citasActivas, hayVentasCargadas, ventasParaTelefono, esVendida]);
 
+  const leadsSinCitaConVenta = useMemo(() => {
+    if (!hayVentasCargadas) return new Set();
+    const ids = new Set();
+    leadsSinCita.forEach((l) => {
+      if (l.telefono && esVendida(ventasParaTelefono(l.telefono))) ids.add(l.id);
+    });
+    return ids;
+  }, [leadsSinCita, hayVentasCargadas, ventasParaTelefono, esVendida]);
+
   const cargaPorVendedor = useMemo(() => {
     const map = {};
     vendedores.forEach((v) => (map[v.id] = 0));
@@ -816,15 +980,46 @@ export default function AgendaVendedores() {
     return map;
   }, [gestores, citasActivas]);
 
-  // ---------- Resumen anual del listado de ventas (histórico + cotejo combinados) ----------
-  const resumenVentas = useMemo(() => {
-    if (todosLosRegistros.length === 0) return null;
+  // Convierte cada lead sin cita en un registro con la misma forma que los del Excel,
+  // para que entre igual en los KPIs (citas generadas por gestor lead, con o sin vendedor).
+  // El estado de venta se resuelve en vivo cruzando su teléfono con los listados cargados.
+  const registrosDeLeadsSinCita = useMemo(() => {
+    return leadsSinCita.map((l) => {
+      const v = vendedores.find((vv) => vv.id === l.vendorId);
+      const g = gestores.find((gg) => gg.id === l.gestorId);
+      const matches = ventasParaTelefono(l.telefono);
+      const columnaEstadoExiste = todosLosRegistros.some((r) => r.vendido !== null && r.vendido !== undefined);
+      const vendido = matches.length === 0
+        ? null
+        : columnaEstadoExiste
+          ? (matches.some((m) => m.vendido === true) ? true : matches.some((m) => m.vendido === false) ? false : null)
+          : true;
+      return {
+        phone: normalizePhone(l.telefono),
+        date: l.creadoEn ? new Date(l.creadoEn) : null,
+        vendedor: v?.nombre || "",
+        gestorLead: g?.nombre || "",
+        coche: "",
+        modelo: matches[0]?.modelo || matches[0]?.coche || "",
+        isla: l.isla || matches[0]?.isla || "",
+        sede: l.sede || matches[0]?.sede || "",
+        cliente: l.cliente || matches[0]?.cliente || "",
+        vendido,
+      };
+    });
+  }, [leadsSinCita, vendedores, gestores, ventasParaTelefono, todosLosRegistros]);
 
-    // Si el mismo teléfono aparece en ambos listados (p.ej. una cita del histórico que luego
-    // se vuelve a ver en un cotejo posterior), evitamos contarla dos veces en los KPIs.
-    // Nos quedamos con un registro por teléfono, priorizando el que confirme una venta.
+  // ---------- Resumen anual del listado de ventas (histórico + cotejo + leads sin cita) ----------
+  const resumenVentas = useMemo(() => {
+    const registrosCombinados = [...todosLosRegistros, ...registrosDeLeadsSinCita];
+    if (registrosCombinados.length === 0) return null;
+
+    // Si el mismo teléfono aparece en varios orígenes (p.ej. una cita del histórico que luego
+    // se vuelve a ver en un cotejo posterior, o un lead sin cita que coincide con una fila del
+    // Excel), evitamos contarla dos veces en los KPIs. Nos quedamos con un registro por
+    // teléfono, priorizando el que confirme una venta.
     const porTelefono = new Map();
-    todosLosRegistros.forEach((r) => {
+    registrosCombinados.forEach((r) => {
       if (!r.phone) return;
       const previo = porTelefono.get(r.phone);
       if (!previo) {
@@ -833,7 +1028,10 @@ export default function AgendaVendedores() {
         porTelefono.set(r.phone, r);
       }
     });
-    const registrosUnicos = Array.from(porTelefono.values());
+    // Los leads sin cita sin teléfono (puede pasar, ya que solo el nombre es obligatorio)
+    // no se pueden cotejar por teléfono, pero igualmente deben contar en el informe.
+    const sinTelefono = registrosCombinados.filter((r) => !r.phone);
+    const registrosUnicos = [...Array.from(porTelefono.values()), ...sinTelefono];
 
     const conDatoExplicito = (r) => r.vendido !== null && r.vendido !== undefined;
     // Si el conjunto combinado trae la columna de estado (CIERRE/vendido) con al menos un
@@ -886,7 +1084,7 @@ export default function AgendaVendedores() {
       fechaMin,
       fechaMax,
     };
-  }, [todosLosRegistros]);
+  }, [todosLosRegistros, registrosDeLeadsSinCita]);
 
   if (loading) {
     return (
@@ -927,6 +1125,9 @@ export default function AgendaVendedores() {
             </button>
             <button onClick={() => setVista("gestores")} style={vista === "gestores" ? styles.tabActive : styles.tab}>
               <UserCog size={15} /> Gestores
+            </button>
+            <button onClick={() => setVista("sincita")} style={vista === "sincita" ? styles.tabActive : styles.tab}>
+              <UserPlus size={15} /> Sin cita
             </button>
             <button onClick={() => setVista("ventas")} style={vista === "ventas" ? styles.tabActive : styles.tab}>
               <CarFront size={15} /> Ventas
@@ -1126,6 +1327,113 @@ export default function AgendaVendedores() {
                   </button>
                 </div>
               ))
+            )}
+          </div>
+        </div>
+      )}
+
+      {vista === "sincita" && (
+        <div style={styles.panel}>
+          <div style={styles.panelTitle}>Clientes sin cita</div>
+          <div style={styles.panelHint}>
+            Presupuestos enviados o derivaciones directas a un vendedor (p.ej. empresas), sin pasar por la agenda. Cuentan igualmente en los KPIs de gestor lead y se cotejan por teléfono como una cita más.
+          </div>
+
+          <div style={styles.leadFormGrid}>
+            <input
+              value={nuevoLeadCliente}
+              onChange={(e) => setNuevoLeadCliente(e.target.value)}
+              placeholder="Nombre del cliente"
+              style={styles.input}
+            />
+            <div style={styles.phoneInputWrap}>
+              <Phone size={14} color="#A89B7E" />
+              <input
+                value={nuevoLeadTelefono}
+                onChange={(e) => setNuevoLeadTelefono(e.target.value)}
+                placeholder="Teléfono"
+                style={styles.phoneInput}
+                inputMode="tel"
+              />
+            </div>
+            <select value={nuevoLeadGestorId} onChange={(e) => setNuevoLeadGestorId(e.target.value)} style={styles.select}>
+              <option value="">Gestor lead…</option>
+              {gestores.map((g) => (
+                <option key={g.id} value={g.id}>{g.nombre}</option>
+              ))}
+            </select>
+            <select value={nuevoLeadVendorId} onChange={(e) => setNuevoLeadVendorId(e.target.value)} style={styles.select}>
+              <option value="">Vendedor (opcional)…</option>
+              {vendedores.map((v) => (
+                <option key={v.id} value={v.id}>{v.nombre}</option>
+              ))}
+            </select>
+            <select
+              value={nuevoLeadIsla}
+              onChange={(e) => {
+                const isla = e.target.value;
+                setNuevoLeadIsla(isla);
+                setNuevoLeadSede((ISLAS_SEDES[isla] || [])[0] || "");
+              }}
+              style={styles.select}
+            >
+              <option value="">Isla (opcional)…</option>
+              {ISLAS.map((isla) => (
+                <option key={isla} value={isla}>{isla}</option>
+              ))}
+            </select>
+            {(ISLAS_SEDES[nuevoLeadIsla] || []).length > 0 && (
+              <select value={nuevoLeadSede} onChange={(e) => setNuevoLeadSede(e.target.value)} style={styles.select}>
+                {ISLAS_SEDES[nuevoLeadIsla].map((sede) => (
+                  <option key={sede} value={sede}>{sede}</option>
+                ))}
+              </select>
+            )}
+            <button onClick={handleAddLeadSinCita} style={styles.primaryBtn}>
+              <Plus size={16} /> Añadir
+            </button>
+          </div>
+
+          <div style={styles.vendorList}>
+            {leadsSinCita.length === 0 ? (
+              <div style={styles.panelHint}>Aún no hay clientes sin cita añadidos.</div>
+            ) : (
+              leadsSinCita.map((l) => {
+                const v = vendedores.find((vv) => vv.id === l.vendorId);
+                const g = gestores.find((gg) => gg.id === l.gestorId);
+                const vendido = leadsSinCitaConVenta.has(l.id);
+                const matches = ventasParaTelefono(l.telefono);
+                return (
+                  <div key={l.id} style={{ ...styles.cotejoRow, borderLeftColor: vendido ? "#4F9B72" : "#E5E0D4" }}>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={styles.cotejoName}>
+                        {l.cliente || "Cliente sin nombre"} <span style={styles.cotejoPhone}>{l.telefono}</span>
+                      </div>
+                      <div style={styles.cotejoMeta}>
+                        {g?.nombre ? `Gestor: ${g.nombre}` : "Sin gestor"}
+                        {v?.nombre ? ` · ${v.nombre}` : " · Sin vendedor"}
+                        {l.isla ? ` · ${l.isla}` : ""}
+                        {l.sede ? ` (${l.sede})` : ""}
+                      </div>
+                    </div>
+                    {matches.length > 0 ? (
+                      vendido ? (
+                        <div style={styles.vendidaTag}>
+                          <Check size={12} /> Vendido
+                          {matches[0]?.modelo ? ` · ${matches[0].modelo}` : matches[0]?.coche ? ` · ${matches[0].coche}` : ""}
+                        </div>
+                      ) : (
+                        <div style={styles.pendienteTag}>No vendido</div>
+                      )
+                    ) : (
+                      <div style={styles.pendienteTag}>Sin venta registrada</div>
+                    )}
+                    <button onClick={() => handleRemoveLeadSinCita(l.id)} style={styles.iconBtn} aria-label={`Eliminar ${l.cliente}`}>
+                      <Trash2 size={15} />
+                    </button>
+                  </div>
+                );
+              })
             )}
           </div>
         </div>
@@ -1795,6 +2103,7 @@ const styles = {
   panelHint: { fontSize: 12.5, color: "#8A7B5C", marginBottom: 16 },
 
   addRow: { display: "flex", gap: 8, marginBottom: 18, maxWidth: 560, flexWrap: "wrap" },
+  leadFormGrid: { display: "flex", gap: 8, marginBottom: 18, flexWrap: "wrap", maxWidth: 760, alignItems: "center" },
   input: { flex: 1, border: "1px solid #E5E0D4", borderRadius: 9, padding: "9px 12px", fontSize: 13.5, background: "#fff", color: "#2B2620", minWidth: 140 },
   select: { border: "1px solid #E5E0D4", borderRadius: 9, padding: "9px 10px", fontSize: 13, background: "#fff", color: "#2B2620", minWidth: 120 },
   selectSmall: { border: "1px solid #E5E0D4", borderRadius: 7, padding: "5px 7px", fontSize: 12, background: "#fff", color: "#2B2620" },

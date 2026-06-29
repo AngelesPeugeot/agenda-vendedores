@@ -16,6 +16,7 @@ import {
   Calendar,
   ChevronLeft,
   ChevronRight,
+  ChevronDown,
   Trash2,
   Check,
   AlertCircle,
@@ -30,6 +31,7 @@ import {
   BarChart3,
   UserCog,
   UserPlus,
+  Download,
 } from "lucide-react";
 import * as XLSX from "xlsx";
 import {
@@ -1173,6 +1175,7 @@ export default function AgendaVendedores() {
   const [informeFiltroHasta, setInformeFiltroHasta] = useState("");
   const [informeFiltroGestor, setInformeFiltroGestor] = useState("");
   const [informeFiltroVendedor, setInformeFiltroVendedor] = useState("");
+  const [vistaGraficoMensual, setVistaGraficoMensual] = useState("total");
 
   const hayFiltrosInformeActivos =
     informeFiltroMesAnio || informeFiltroDesde || informeFiltroHasta || informeFiltroGestor || informeFiltroVendedor;
@@ -1218,9 +1221,10 @@ export default function AgendaVendedores() {
       const map = {};
       registrosUnicos.forEach((r) => {
         const clave = (r[campo] || "Sin especificar").trim() || "Sin especificar";
-        if (!map[clave]) map[clave] = { total: 0, vendidos: 0 };
+        if (!map[clave]) map[clave] = { total: 0, vendidos: 0, registros: [] };
         map[clave].total += 1;
         if (esVendidaRecord(r)) map[clave].vendidos += 1;
+        map[clave].registros.push(r);
       });
       return Object.entries(map)
         .map(([nombre, datos]) => ({ nombre, ...datos }))
@@ -1232,17 +1236,32 @@ export default function AgendaVendedores() {
     const porIsla = agrupar("isla");
     const porModelo = agrupar("modelo");
 
+    // Calidad de los datos: cuántos registros no tienen gestor o vendedor asignado,
+    // para detectar huecos de información de un vistazo.
+    const sinGestor = registrosUnicos.filter((r) => !r.gestorLead || !r.gestorLead.trim()).length;
+    const sinVendedor = registrosUnicos.filter((r) => !r.vendedor || !r.vendedor.trim()).length;
+
+    // Islas presentes en el conjunto filtrado, para las series del gráfico mensual por isla.
+    const islasPresentes = Array.from(new Set(registrosUnicos.map((r) => (r.isla || "").trim()).filter(Boolean))).sort();
+
     // Serie mensual: ventas y total de leads/citas por mes, ordenada cronológicamente,
-    // para alimentar el gráfico de tendencia.
+    // para alimentar el gráfico de tendencia. Incluye también el desglose "vendidos por isla"
+    // de cada mes, para el gráfico comparativo por isla.
     const porMesMap = {};
     registrosUnicos.forEach((r) => {
       const clave = r.mesAnio || "Sin mes";
-      if (!porMesMap[clave]) porMesMap[clave] = { total: 0, vendidos: 0 };
+      if (!porMesMap[clave]) {
+        porMesMap[clave] = { total: 0, vendidos: 0, porIsla: {} };
+      }
       porMesMap[clave].total += 1;
-      if (esVendidaRecord(r)) porMesMap[clave].vendidos += 1;
+      if (esVendidaRecord(r)) {
+        porMesMap[clave].vendidos += 1;
+        const isla = (r.isla || "Sin especificar").trim() || "Sin especificar";
+        porMesMap[clave].porIsla[isla] = (porMesMap[clave].porIsla[isla] || 0) + 1;
+      }
     });
     const porMes = Object.entries(porMesMap)
-      .map(([mesAnio, datos]) => ({ mesAnio, label: mesAnioLabel(mesAnio), ...datos }))
+      .map(([mesAnio, datos]) => ({ mesAnio, label: mesAnioLabel(mesAnio), ...datos, ...datos.porIsla }))
       .sort((a, b) => (a.mesAnio === "Sin mes" ? 1 : b.mesAnio === "Sin mes" ? -1 : a.mesAnio.localeCompare(b.mesAnio)));
 
     const fechasValidas = registrosUnicos.map((r) => r.date).filter(Boolean);
@@ -1254,15 +1273,72 @@ export default function AgendaVendedores() {
       totalVendidos,
       totalNoVendidos: noVendidos.length,
       tasaConversion,
+      sinGestor,
+      sinVendedor,
       porVendedor,
       porGestorLead,
       porIsla,
       porModelo,
       porMes,
+      islasPresentes,
       fechaMin,
       fechaMax,
     };
   }, [registrosFiltradosInforme, esVendidaRecordGlobal, columnaEstadoExisteGlobal]);
+
+  // Exporta el informe (ya filtrado) a un Excel con varias hojas: resumen, desgloses y detalle.
+  const handleExportarInforme = useCallback(() => {
+    if (!resumenVentas) return;
+    const wb = XLSX.utils.book_new();
+
+    const hojaResumen = XLSX.utils.aoa_to_sheet([
+      ["Informe anual de ventas"],
+      [],
+      ["Registros totales", resumenVentas.totalRegistros],
+      ["Vendidos", resumenVentas.totalVendidos],
+      ["No vendidos", resumenVentas.totalNoVendidos],
+      ["Tasa de conversión", `${resumenVentas.tasaConversion}%`],
+      ["Sin gestor asignado", resumenVentas.sinGestor],
+      ["Sin vendedor asignado", resumenVentas.sinVendedor],
+    ]);
+    XLSX.utils.book_append_sheet(wb, hojaResumen, "Resumen");
+
+    const aHoja = (filas) =>
+      XLSX.utils.aoa_to_sheet([
+        ["Nombre", "Vendidos", "Total", "Tasa de conversión"],
+        ...filas.map((f) => [f.nombre, f.vendidos, f.total, `${f.total > 0 ? Math.round((f.vendidos / f.total) * 100) : 0}%`]),
+      ]);
+    XLSX.utils.book_append_sheet(wb, aHoja(resumenVentas.porVendedor), "Por vendedor");
+    XLSX.utils.book_append_sheet(wb, aHoja(resumenVentas.porGestorLead), "Por gestor lead");
+    XLSX.utils.book_append_sheet(wb, aHoja(resumenVentas.porIsla), "Por isla");
+    XLSX.utils.book_append_sheet(wb, aHoja(resumenVentas.porModelo), "Por modelo");
+
+    const hojaMes = XLSX.utils.aoa_to_sheet([
+      ["Mes", "Total", "Vendidos"],
+      ...resumenVentas.porMes.map((m) => [m.label, m.total, m.vendidos]),
+    ]);
+    XLSX.utils.book_append_sheet(wb, hojaMes, "Por mes");
+
+    const hojaDetalle = XLSX.utils.aoa_to_sheet([
+      ["Cliente", "Teléfono", "Mes", "Vendedor", "Gestor lead", "Isla", "Sede", "Modelo", "Estado"],
+      ...registrosFiltradosInforme.map((r) => [
+        r.cliente || "",
+        r.phone || "",
+        r.mesAnio ? mesAnioLabel(r.mesAnio) : "",
+        r.vendedor || "",
+        r.gestorLead || "",
+        r.isla || "",
+        r.sede || "",
+        r.modelo || r.coche || "",
+        r.vendido === true ? "Vendido" : r.vendido === false ? "No vendido" : "Sin decidir",
+      ]),
+    ]);
+    XLSX.utils.book_append_sheet(wb, hojaDetalle, "Detalle");
+
+    const fecha = new Date().toISOString().slice(0, 10);
+    XLSX.writeFile(wb, `informe-ventas-${fecha}.xlsx`);
+    showToast("Informe exportado");
+  }, [resumenVentas, registrosFiltradosInforme, showToast]);
 
   if (loading) {
     return (
@@ -1861,7 +1937,14 @@ export default function AgendaVendedores() {
 
       {vista === "informe" && (
         <div style={styles.panel}>
-          <div style={styles.panelTitle}>Informe anual de ventas</div>
+          <div style={styles.informeTablaHeaderRow}>
+            <div style={styles.panelTitle}>Informe anual de ventas</div>
+            {resumenVentas && (
+              <button onClick={handleExportarInforme} style={styles.secondaryBtn}>
+                <Download size={14} /> Exportar a Excel
+              </button>
+            )}
+          </div>
           <div style={styles.panelHint}>
             Resumen calculado a partir del listado histórico, del listado de cotejo y de los clientes sin cita.
           </div>
@@ -1943,19 +2026,66 @@ export default function AgendaVendedores() {
                     </div>
                   </div>
 
+                  {(resumenVentas.sinGestor > 0 || resumenVentas.sinVendedor > 0) && (
+                    <div style={styles.informeAvisoDatos}>
+                      <AlertCircle size={13} />
+                      {resumenVentas.sinGestor > 0 && <span>{resumenVentas.sinGestor} sin gestor lead asignado</span>}
+                      {resumenVentas.sinGestor > 0 && resumenVentas.sinVendedor > 0 && <span> · </span>}
+                      {resumenVentas.sinVendedor > 0 && <span>{resumenVentas.sinVendedor} sin vendedor asignado</span>}
+                    </div>
+                  )}
+
                   {resumenVentas.porMes.length > 1 && (
                     <div style={styles.informeChartWrap}>
-                      <div style={styles.informeTablaTitulo}>Ventas por mes</div>
+                      <div style={styles.informeTablaHeaderRow}>
+                        <div style={styles.informeTablaTitulo}>Ventas por mes</div>
+                        {resumenVentas.islasPresentes.length > 1 && (
+                          <div style={styles.informeOrdenToggle}>
+                            <button
+                              onClick={() => setVistaGraficoMensual("total")}
+                              style={vistaGraficoMensual === "total" ? styles.informeOrdenBtnActive : styles.informeOrdenBtn}
+                            >
+                              Total
+                            </button>
+                            <button
+                              onClick={() => setVistaGraficoMensual("isla")}
+                              style={vistaGraficoMensual === "isla" ? styles.informeOrdenBtnActive : styles.informeOrdenBtn}
+                            >
+                              Por isla
+                            </button>
+                          </div>
+                        )}
+                      </div>
                       <ResponsiveContainer width="100%" height={260}>
-                        <BarChart data={resumenVentas.porMes} margin={{ top: 10, right: 10, left: -10, bottom: 0 }}>
-                          <CartesianGrid strokeDasharray="3 3" stroke="#EFE9DA" />
-                          <XAxis dataKey="label" tick={{ fontSize: 11, fill: "#8A7B5C" }} />
-                          <YAxis tick={{ fontSize: 11, fill: "#8A7B5C" }} allowDecimals={false} />
-                          <Tooltip contentStyle={{ fontSize: 12, borderRadius: 8, border: "1px solid #EBE4D3" }} />
-                          <Legend wrapperStyle={{ fontSize: 12 }} />
-                          <Bar dataKey="total" name="Registros" fill="#D8CFB8" radius={[4, 4, 0, 0]} />
-                          <Bar dataKey="vendidos" name="Vendidos" fill="#4F9B72" radius={[4, 4, 0, 0]} />
-                        </BarChart>
+                        {vistaGraficoMensual === "isla" && resumenVentas.islasPresentes.length > 1 ? (
+                          <BarChart data={resumenVentas.porMes} margin={{ top: 10, right: 10, left: -10, bottom: 0 }}>
+                            <CartesianGrid strokeDasharray="3 3" stroke="#EFE9DA" />
+                            <XAxis dataKey="label" tick={{ fontSize: 11, fill: "#8A7B5C" }} />
+                            <YAxis tick={{ fontSize: 11, fill: "#8A7B5C" }} allowDecimals={false} />
+                            <Tooltip contentStyle={{ fontSize: 12, borderRadius: 8, border: "1px solid #EBE4D3" }} />
+                            <Legend wrapperStyle={{ fontSize: 12 }} />
+                            {resumenVentas.islasPresentes.map((isla) => (
+                              <Bar
+                                key={isla}
+                                dataKey={isla}
+                                name={isla}
+                                stackId="islas"
+                                fill={(PALETA_ISLAS[isla] || PALETA_ISLAS["Tenerife"]).hue}
+                                radius={[2, 2, 0, 0]}
+                              />
+                            ))}
+                          </BarChart>
+                        ) : (
+                          <BarChart data={resumenVentas.porMes} margin={{ top: 10, right: 10, left: -10, bottom: 0 }}>
+                            <CartesianGrid strokeDasharray="3 3" stroke="#EFE9DA" />
+                            <XAxis dataKey="label" tick={{ fontSize: 11, fill: "#8A7B5C" }} />
+                            <YAxis tick={{ fontSize: 11, fill: "#8A7B5C" }} allowDecimals={false} />
+                            <Tooltip contentStyle={{ fontSize: 12, borderRadius: 8, border: "1px solid #EBE4D3" }} />
+                            <Legend wrapperStyle={{ fontSize: 12 }} />
+                            <Bar dataKey="total" name="Registros" fill="#D8CFB8" radius={[4, 4, 0, 0]} />
+                            <Bar dataKey="vendidos" name="Vendidos" fill="#4F9B72" radius={[4, 4, 0, 0]} />
+                          </BarChart>
+                        )}
                       </ResponsiveContainer>
                     </div>
                   )}
@@ -2092,29 +2222,91 @@ function FragmentRow({ children }) {
 }
 
 // ---------- Tabla de desglose para el informe anual ----------
+// Permite alternar el orden entre volumen (vendidos) y tasa de conversión (%), y expandir
+// cada fila para ver el detalle de los registros concretos que la componen.
 function InformeTabla({ titulo, filas }) {
+  const [orden, setOrden] = useState("volumen");
+  const [expandida, setExpandida] = useState(null);
+
   if (!filas || filas.length === 0) return null;
+
+  const filasOrdenadas = useMemo(() => {
+    const copia = [...filas];
+    if (orden === "conversion") {
+      copia.sort((a, b) => {
+        const tasaA = a.total > 0 ? a.vendidos / a.total : 0;
+        const tasaB = b.total > 0 ? b.vendidos / b.total : 0;
+        return tasaB - tasaA || b.total - a.total;
+      });
+    } else {
+      copia.sort((a, b) => b.vendidos - a.vendidos || b.total - a.total);
+    }
+    return copia;
+  }, [filas, orden]);
+
   const maxVendidos = Math.max(1, ...filas.map((f) => f.vendidos));
+
   return (
     <div style={styles.informeTablaWrap}>
-      <div style={styles.informeTablaTitulo}>{titulo}</div>
+      <div style={styles.informeTablaHeaderRow}>
+        <div style={styles.informeTablaTitulo}>{titulo}</div>
+        <div style={styles.informeOrdenToggle}>
+          <button
+            onClick={() => setOrden("volumen")}
+            style={orden === "volumen" ? styles.informeOrdenBtnActive : styles.informeOrdenBtn}
+          >
+            Volumen
+          </button>
+          <button
+            onClick={() => setOrden("conversion")}
+            style={orden === "conversion" ? styles.informeOrdenBtnActive : styles.informeOrdenBtn}
+          >
+            Conversión
+          </button>
+        </div>
+      </div>
       <div style={styles.informeTablaRows}>
-        {filas.map((f) => {
+        {filasOrdenadas.map((f) => {
           const tasa = f.total > 0 ? Math.round((f.vendidos / f.total) * 100) : 0;
+          const isExpanded = expandida === f.nombre;
           return (
-            <div key={f.nombre} style={styles.informeTablaRow}>
-              <span style={styles.informeTablaNombre}>{f.nombre}</span>
-              <span style={styles.legendBarWrap}>
-                <span
-                  style={{
-                    ...styles.legendBar,
-                    width: `${Math.max(6, (f.vendidos / maxVendidos) * 100)}%`,
-                    background: "#4F9B72",
-                  }}
-                />
-              </span>
-              <span style={styles.informeTablaCifras}>{f.vendidos}/{f.total}</span>
-              <span style={styles.informeTablaTasa}>{tasa}%</span>
+            <div key={f.nombre}>
+              <button
+                onClick={() => setExpandida(isExpanded ? null : f.nombre)}
+                style={styles.informeTablaRowBtn}
+              >
+                <span style={styles.informeTablaNombre}>{f.nombre}</span>
+                <span style={styles.legendBarWrap}>
+                  <span
+                    style={{
+                      ...styles.legendBar,
+                      width: `${Math.max(6, (orden === "conversion" ? tasa : (f.vendidos / maxVendidos) * 100))}%`,
+                      background: "#4F9B72",
+                    }}
+                  />
+                </span>
+                <span style={styles.informeTablaCifras}>{f.vendidos}/{f.total}</span>
+                <span style={styles.informeTablaTasa}>{tasa}%</span>
+                <ChevronDown size={13} style={{ transform: isExpanded ? "rotate(180deg)" : "none", flexShrink: 0, color: "#A89B7E" }} />
+              </button>
+              {isExpanded && (
+                <div style={styles.informeDetalleWrap}>
+                  {(f.registros || []).map((r, i) => (
+                    <div key={i} style={styles.informeDetalleRow}>
+                      <span style={styles.informeDetalleNombre}>{r.cliente || "Sin nombre"}</span>
+                      <span style={styles.informeDetallePhone}>{r.phone || "—"}</span>
+                      <span style={styles.informeDetalleMes}>{r.mesAnio ? mesAnioLabel(r.mesAnio) : "—"}</span>
+                      {r.vendido === true ? (
+                        <span style={styles.vendidaTag}><Check size={11} /> Vendido</span>
+                      ) : r.vendido === false ? (
+                        <span style={styles.pendienteTag}>No vendido</span>
+                      ) : (
+                        <span style={styles.pendienteTag}>Sin decidir</span>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
           );
         })}
@@ -2457,15 +2649,26 @@ const styles = {
   informeStatNumber: { fontFamily: "var(--font-display)", fontSize: 24, fontWeight: 600, color: "#3D362A" },
   informeStatLabel: { fontSize: 11.5, color: "#8A7B5C", marginTop: 2 },
 
-  informeTablaWrap: { marginBottom: 24, maxWidth: 560 },
+  informeTablaWrap: { marginBottom: 24, maxWidth: 620 },
   informeTablaTitulo: { fontSize: 13.5, fontWeight: 600, marginBottom: 10, color: "#3D362A" },
   informeFiltroLabel: { fontSize: 12, color: "#8A7B5C", fontWeight: 500 },
   informeChartWrap: { background: "#fff", border: "1px solid #EBE4D3", borderRadius: 10, padding: "16px 18px", marginBottom: 26, maxWidth: 700 },
+  informeAvisoDatos: { display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: "#A14B2C", background: "#FBEDE6", padding: "7px 11px", borderRadius: 8, marginBottom: 18, maxWidth: 600 },
+  informeTablaHeaderRow: { display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 },
+  informeOrdenToggle: { display: "flex", gap: 4, background: "#F1EAD9", padding: 3, borderRadius: 7 },
+  informeOrdenBtn: { border: "none", background: "transparent", color: "#7A6B4C", fontSize: 11, fontWeight: 500, padding: "4px 9px", borderRadius: 5 },
+  informeOrdenBtnActive: { border: "none", background: "#FFFFFF", color: "#C45A2E", fontSize: 11, fontWeight: 600, padding: "4px 9px", borderRadius: 5, boxShadow: "0 1px 2px rgba(0,0,0,0.06)" },
   informeTablaRows: { display: "flex", flexDirection: "column", gap: 7 },
   informeTablaRow: { display: "flex", alignItems: "center", gap: 8 },
+  informeTablaRowBtn: { display: "flex", alignItems: "center", gap: 8, width: "100%", border: "none", background: "transparent", padding: "3px 0", cursor: "pointer", textAlign: "left" },
   informeTablaNombre: { fontSize: 12, width: 130, flexShrink: 0, color: "#5C5240", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
   informeTablaCifras: { fontSize: 12, fontWeight: 600, width: 48, textAlign: "right", color: "#5C5240", flexShrink: 0 },
   informeTablaTasa: { fontSize: 11.5, width: 38, textAlign: "right", color: "#8A7B5C", flexShrink: 0 },
+  informeDetalleWrap: { display: "flex", flexDirection: "column", gap: 4, padding: "8px 10px 8px 22px", background: "#FFFEFB", borderRadius: 7, marginTop: 4, marginBottom: 4, border: "1px solid #EFE9DA" },
+  informeDetalleRow: { display: "flex", alignItems: "center", gap: 8 },
+  informeDetalleNombre: { fontSize: 11.5, flex: 1, minWidth: 0, color: "#5C5240", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
+  informeDetallePhone: { fontSize: 11, color: "#A89B7E", width: 90, flexShrink: 0 },
+  informeDetalleMes: { fontSize: 11, color: "#A89B7E", width: 80, flexShrink: 0 },
 
   modalOverlay: { position: "fixed", inset: 0, background: "rgba(43,38,32,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 50, padding: 16 },
   modalCard: { background: "#FBF8F2", borderRadius: 14, padding: 22, width: 380, maxWidth: "100%", boxShadow: "0 12px 32px rgba(0,0,0,0.18)", border: "1px solid #EBE4D3" },

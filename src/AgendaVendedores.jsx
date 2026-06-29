@@ -203,6 +203,73 @@ function slotsDia() {
   return slots;
 }
 
+// Convierte un texto de horario tipo "9:00-13:30, 16:30-20:00" en un array de horas de
+// inicio de slot (cada slot dura 30 min), igual que usa internamente la rejilla de turnos.
+// Acepta separar varios tramos por coma, espacios opcionales, y horas como "9" o "9:00" o "9.5".
+// Lanza un Error con un mensaje legible si el texto no se puede interpretar.
+function parseHorarioTexto(texto) {
+  const limpio = (texto || "").trim();
+  if (!limpio) return [];
+
+  const aDecimal = (str) => {
+    const s = str.trim();
+    const conColon = s.match(/^(\d{1,2}):(\d{2})$/);
+    if (conColon) {
+      const h = Number(conColon[1]);
+      const m = Number(conColon[2]);
+      return h + m / 60;
+    }
+    const soloNumero = s.match(/^(\d{1,2})([.,](\d+))?$/);
+    if (soloNumero) {
+      const h = Number(soloNumero[1]);
+      const frac = soloNumero[3] ? Number("0." + soloNumero[3]) : 0;
+      return h + frac;
+    }
+    throw new Error(`No entiendo la hora "${str}". Usa un formato como 9:00 o 13:30.`);
+  };
+
+  const tramos = limpio.split(",").map((t) => t.trim()).filter(Boolean);
+  const horas = new Set();
+
+  tramos.forEach((tramo) => {
+    const partes = tramo.split(/-|–/).map((p) => p.trim());
+    if (partes.length !== 2) {
+      throw new Error(`No entiendo el tramo "${tramo}". Usa el formato 9:00-13:30.`);
+    }
+    let desde = aDecimal(partes[0]);
+    let hasta = aDecimal(partes[1]);
+    // Redondea al slot de 30 min más cercano, dentro del horario de la agenda.
+    desde = Math.max(HORA_INICIO, Math.round(desde * 2) / 2);
+    hasta = Math.min(HORA_FIN, Math.round(hasta * 2) / 2);
+    if (hasta <= desde) {
+      throw new Error(`El tramo "${tramo}" no es válido: la hora final debe ser posterior a la inicial.`);
+    }
+    for (let h = desde; h < hasta; h += 0.5) horas.add(h);
+  });
+
+  return Array.from(horas).sort((a, b) => a - b);
+}
+
+// Convierte un array de horas de inicio de slot (las que usa la rejilla internamente) en un
+// texto legible con tramos agrupados, ej. [9, 9.5, 10, 16.5, 17] -> "9:00-10:30, 16:30-17:30".
+// Es la función inversa de parseHorarioTexto, para poder mostrar y editar el horario actual.
+function horasATexto(horas) {
+  if (!horas || horas.length === 0) return "";
+  const ordenadas = [...horas].sort((a, b) => a - b);
+  const tramos = [];
+  let inicio = ordenadas[0];
+  let anterior = ordenadas[0];
+  for (let i = 1; i <= ordenadas.length; i++) {
+    const actual = ordenadas[i];
+    if (actual === undefined || actual - anterior > 0.5) {
+      tramos.push(`${horaLabel(inicio)}-${horaLabel(anterior + 0.5)}`);
+      inicio = actual;
+    }
+    anterior = actual;
+  }
+  return tramos.join(", ");
+}
+
 function getMonday(d) {
   const date = new Date(d);
   const day = date.getDay();
@@ -706,6 +773,21 @@ export default function AgendaVendedores() {
       else if (tramo === "completo") hours = slots;
       else hours = [];
       actual[dayIdx] = hours;
+      await setTurnoVendorDia(vendorId, actual);
+    },
+    [turnos, setTurnoVendorDia]
+  );
+
+  // Aplica un texto de horario (ej. "9:00-13:30, 16:30-20:00") a una lista de días de golpe.
+  // diasIdx es un array de índices de día (0=Lunes...5=Sábado). Lanza el error de parseo hacia
+  // arriba para que el formulario lo muestre, sin guardar nada si el texto no es válido.
+  const aplicarHorarioTexto = useCallback(
+    async (vendorId, diasIdx, texto) => {
+      const horas = parseHorarioTexto(texto); // puede lanzar Error, se propaga al caller
+      const actual = { ...(turnos[vendorId] || {}) };
+      diasIdx.forEach((dayIdx) => {
+        actual[dayIdx] = horas;
+      });
       await setTurnoVendorDia(vendorId, actual);
     },
     [turnos, setTurnoVendorDia]
@@ -1749,58 +1831,21 @@ export default function AgendaVendedores() {
       {vendedores.length > 0 && vista === "turnos" && (
         <div style={styles.panel}>
           <div style={styles.panelTitle}>Turnos rotativos de la semana</div>
-          <div style={styles.panelHint}>Marca las horas en las que cada vendedor trabaja. Usa los botones rápidos para mañana, tarde o jornada completa.</div>
+          <div style={styles.panelHint}>
+            Escribe el horario de cada vendedor como texto, por ejemplo <strong>9:00-13:30, 16:30-20:00</strong>. El de lunes a viernes se aplica a los 5 días de golpe; el sábado es independiente. Deja el campo vacío para marcar que no trabaja ese día.
+          </div>
           {vendedoresFiltrados.length === 0 && (
             <div style={styles.noVendorWarn}>Ningún vendedor coincide con el filtro de isla/sede seleccionado.</div>
           )}
-          {vendedoresFiltrados.map((v) => {
-            const c = colorParaSede(v.isla, v.sede);
-            return (
-              <div key={v.id} style={styles.turnoBlock}>
-                <div style={styles.turnoVendorHeader}>
-                  <div style={{ ...styles.vendorDot, background: c.border }} />
-                  <span style={styles.turnoVendorName}>{v.nombre}</span>
-                  <span style={styles.turnoVendorLoc}>{v.sede}, {v.isla}</span>
-                </div>
-                <div style={styles.turnoGrid}>
-                  <div style={styles.turnoGridCorner} />
-                  {DIAS_CORTO.map((d, i) => (
-                    <div key={i} style={styles.turnoDayHeader}>
-                      <div>{d}</div>
-                      <div style={styles.turnoQuickRow}>
-                        <button style={styles.quickBtn} onClick={() => setBulkTurno(v.id, i, "manana")}>M</button>
-                        <button style={styles.quickBtn} onClick={() => setBulkTurno(v.id, i, "tarde")}>T</button>
-                        <button style={styles.quickBtn} onClick={() => setBulkTurno(v.id, i, "completo")}>C</button>
-                        <button style={styles.quickBtnClear} onClick={() => setBulkTurno(v.id, i, "ninguno")}>×</button>
-                      </div>
-                    </div>
-                  ))}
-                  {slots.map((h) => (
-                    <FragmentRow key={h}>
-                      <div style={styles.turnoHourLabel}>{horaLabel(h)}</div>
-                      {DIAS.map((_, dayIdx) => {
-                        const active = isWorking(v.id, dayIdx, h);
-                        return (
-                          <button
-                            key={dayIdx}
-                            onClick={() => toggleTurno(v.id, dayIdx, h)}
-                            style={{
-                              ...styles.turnoCell,
-                              background: active ? c.bg : "transparent",
-                              borderColor: active ? c.border : "#E5E0D4",
-                            }}
-                            aria-label={`${v.nombre} ${active ? "trabaja" : "no trabaja"} ${DIAS[dayIdx]} ${horaLabel(h)}`}
-                          >
-                            {active && <Check size={12} color={c.border} />}
-                          </button>
-                        );
-                      })}
-                    </FragmentRow>
-                  ))}
-                </div>
-              </div>
-            );
-          })}
+          {vendedoresFiltrados.map((v) => (
+            <VendedorTurnoTexto
+              key={v.id}
+              vendedor={v}
+              turnos={turnos[v.id] || {}}
+              onAplicar={aplicarHorarioTexto}
+              showToast={showToast}
+            />
+          ))}
         </div>
       )}
 
@@ -2315,6 +2360,112 @@ function InformeTabla({ titulo, filas }) {
   );
 }
 
+// ---------- Turno por vendedor, editado como texto (L-V y Sábado por separado) ----------
+function VendedorTurnoTexto({ vendedor, turnos, onAplicar, showToast }) {
+  const c = colorParaSede(vendedor.isla, vendedor.sede);
+
+  // Días de lunes a viernes son los índices 0-4; sábado es el índice 5.
+  const diasLV = [0, 1, 2, 3, 4];
+  const diaSabado = 5;
+
+  // Si los 5 días de lunes a viernes ya tienen exactamente el mismo horario guardado, lo
+  // mostramos como punto de partida. Si hay alguna diferencia entre ellos (por ejemplo datos
+  // antiguos con horarios distintos por día), dejamos el campo vacío en vez de mostrar uno
+  // cualquiera, para no dar una falsa sensación de que todos coinciden.
+  const horariosLV = diasLV.map((d) => JSON.stringify((turnos[d] || []).slice().sort((a, b) => a - b)));
+  const todosIguales = horariosLV.every((h) => h === horariosLV[0]);
+  const textoInicialLV = todosIguales ? horasATexto(turnos[diasLV[0]] || []) : "";
+  const textoInicialSabado = horasATexto(turnos[diaSabado] || []);
+
+  const [textoLV, setTextoLV] = useState(textoInicialLV);
+  const [textoSabado, setTextoSabado] = useState(textoInicialSabado);
+  const [errorLV, setErrorLV] = useState(null);
+  const [errorSabado, setErrorSabado] = useState(null);
+
+  // Si los turnos cambian desde fuera (otro dispositivo editando a la vez), refrescamos el
+  // valor mostrado, pero solo si el usuario no está con cambios sin guardar en ese campo.
+  const [tocadoLV, setTocadoLV] = useState(false);
+  const [tocadoSabado, setTocadoSabado] = useState(false);
+  useEffect(() => {
+    if (!tocadoLV) setTextoLV(textoInicialLV);
+  }, [textoInicialLV, tocadoLV]);
+  useEffect(() => {
+    if (!tocadoSabado) setTextoSabado(textoInicialSabado);
+  }, [textoInicialSabado, tocadoSabado]);
+
+  const guardarLV = useCallback(async () => {
+    try {
+      await onAplicar(vendedor.id, diasLV, textoLV);
+      setErrorLV(null);
+      setTocadoLV(false);
+      showToast(`Horario de lunes a viernes guardado para ${vendedor.nombre}`);
+    } catch (e) {
+      setErrorLV(e.message);
+    }
+  }, [onAplicar, vendedor.id, vendedor.nombre, textoLV, showToast]);
+
+  const guardarSabado = useCallback(async () => {
+    try {
+      await onAplicar(vendedor.id, [diaSabado], textoSabado);
+      setErrorSabado(null);
+      setTocadoSabado(false);
+      showToast(`Horario del sábado guardado para ${vendedor.nombre}`);
+    } catch (e) {
+      setErrorSabado(e.message);
+    }
+  }, [onAplicar, vendedor.id, vendedor.nombre, textoSabado, showToast]);
+
+  return (
+    <div style={styles.turnoTextoBlock}>
+      <div style={styles.turnoVendorHeader}>
+        <div style={{ ...styles.vendorDot, background: c.border }} />
+        <span style={styles.turnoVendorName}>{vendedor.nombre}</span>
+        <span style={styles.turnoVendorLoc}>{vendedor.sede}, {vendedor.isla}</span>
+      </div>
+      <div style={styles.turnoTextoRow}>
+        <label style={styles.turnoTextoLabel}>Lunes a viernes</label>
+        <input
+          value={textoLV}
+          onChange={(e) => {
+            setTextoLV(e.target.value);
+            setTocadoLV(true);
+            setErrorLV(null);
+          }}
+          onKeyDown={(e) => e.key === "Enter" && guardarLV()}
+          placeholder="ej. 9:00-13:30, 16:30-20:00"
+          style={{ ...styles.input, ...(errorLV ? styles.inputError : {}) }}
+        />
+        <button onClick={guardarLV} style={styles.secondaryBtnSmall}>
+          <Check size={12} /> Aplicar
+        </button>
+      </div>
+      {errorLV && <div style={styles.turnoTextoError}>{errorLV}</div>}
+      {!todosIguales && !tocadoLV && (
+        <div style={styles.turnoTextoAviso}>Los días de esta semana tienen horarios distintos entre sí. Escribe uno para igualarlos todos.</div>
+      )}
+
+      <div style={styles.turnoTextoRow}>
+        <label style={styles.turnoTextoLabel}>Sábado</label>
+        <input
+          value={textoSabado}
+          onChange={(e) => {
+            setTextoSabado(e.target.value);
+            setTocadoSabado(true);
+            setErrorSabado(null);
+          }}
+          onKeyDown={(e) => e.key === "Enter" && guardarSabado()}
+          placeholder="ej. 10:00-13:00 (vacío si no trabaja)"
+          style={{ ...styles.input, ...(errorSabado ? styles.inputError : {}) }}
+        />
+        <button onClick={guardarSabado} style={styles.secondaryBtnSmall}>
+          <Check size={12} /> Aplicar
+        </button>
+      </div>
+      {errorSabado && <div style={styles.turnoTextoError}>{errorSabado}</div>}
+    </div>
+  );
+}
+
 // ---------- Fila de vendedor (con edición de isla/sede) ----------
 function VendedorRow({ vendedor, citasCount, onRemove, onUpdateUbicacion }) {
   const [editando, setEditando] = useState(false);
@@ -2609,6 +2760,12 @@ const styles = {
   vendorMeta: { fontSize: 12, color: "#8A7B5C", marginTop: 1 },
 
   turnoBlock: { marginBottom: 26 },
+  turnoTextoBlock: { marginBottom: 22, background: "#fff", border: "1px solid #EBE4D3", borderRadius: 10, padding: "14px 16px", maxWidth: 620 },
+  turnoTextoRow: { display: "flex", alignItems: "center", gap: 8, marginTop: 8 },
+  turnoTextoLabel: { fontSize: 12, fontWeight: 600, color: "#7A6B4C", width: 95, flexShrink: 0 },
+  turnoTextoError: { fontSize: 11.5, color: "#A14B2C", marginTop: 4, marginLeft: 103 },
+  turnoTextoAviso: { fontSize: 11.5, color: "#8A5E10", marginTop: 4, marginLeft: 103 },
+  inputError: { borderColor: "#D98A6F" },
   turnoVendorHeader: { display: "flex", alignItems: "center", gap: 8, marginBottom: 8 },
   turnoVendorName: { fontSize: 13.5, fontWeight: 600 },
   turnoVendorLoc: { fontSize: 11.5, color: "#A89B7E" },

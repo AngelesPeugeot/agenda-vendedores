@@ -549,6 +549,34 @@ function useCitasSync(weekKey) {
   return { citas, addCita, updateCita, removeCita };
 }
 
+// Lee TODAS las citas de TODAS las semanas (no solo la semana que se está viendo), solo para
+// alimentar el informe de KPIs. Cada cita ya trae su weekKey, así que se puede saber a qué
+// semana/mes pertenece sin tener que navegar la agenda semana por semana.
+function useTodasLasCitasSync() {
+  const [todasLasCitas, setTodasLasCitas] = useState([]);
+
+  useEffect(() => {
+    if (!firebaseDisponible) {
+      setTodasLasCitas([]);
+      return;
+    }
+    const citasRef = ref(db, "citas");
+    const unsub = onValue(citasRef, (snap) => {
+      const data = snap.val() || {};
+      const list = [];
+      Object.entries(data).forEach(([weekKey, citasSemana]) => {
+        Object.entries(citasSemana || {}).forEach(([id, c]) => {
+          list.push({ id, weekKey, ...c });
+        });
+      });
+      setTodasLasCitas(list);
+    }, (err) => console.error("Error sincronizando todas las citas", err));
+    return () => unsub();
+  }, []);
+
+  return { todasLasCitas };
+}
+
 // tipo: "historico" (se sube una vez, alimenta los KPIs del informe anual) o
 // "cotejo" (se sube/reemplaza con frecuencia, alimenta el cotejo en vivo de la agenda).
 // Cada tipo vive en su propia ruta de Firebase, independiente del otro.
@@ -593,6 +621,7 @@ export default function AgendaVendedores() {
   const { leadsSinCita, addLeadSinCita, addLeadsSinCitaEnLote, updateLeadSinCita, removeLeadSinCita } = useLeadsSinCitaSync();
   const { turnos, setTurnoVendorDia } = useTurnosSync(weekKey);
   const { citas, addCita, updateCita, removeCita } = useCitasSync(weekKey);
+  const { todasLasCitas } = useTodasLasCitasSync();
   const { ventas: ventasHistorico, guardarVentas: guardarVentasHistorico } = useVentasSync("historico");
   const { ventas: ventasCotejo, guardarVentas: guardarVentasCotejo } = useVentasSync("cotejo");
 
@@ -674,34 +703,6 @@ export default function AgendaVendedores() {
   );
 
   // ---------- Leads sin cita (presupuesto / derivados directamente a vendedor) ----------
-  const handleAddLeadSinCita = useCallback(async () => {
-    const cliente = nuevoLeadCliente.trim();
-    const telefono = nuevoLeadTelefono.trim();
-    if (!cliente && !telefono) return;
-    const nuevo = {
-      id: genId(),
-      cliente,
-      telefono,
-      gestorId: nuevoLeadGestorId || "",
-      vendorId: nuevoLeadVendorId || "",
-      isla: nuevoLeadIsla || "",
-      sede: nuevoLeadSede || "",
-      mesAnio: nuevoLeadMesAnio || "",
-      creadoEn: new Date().toISOString(),
-      origen: "manual",
-    };
-    await addLeadSinCita(nuevo);
-    setNuevoLeadCliente("");
-    setNuevoLeadTelefono("");
-    setNuevoLeadGestorId("");
-    setNuevoLeadVendorId("");
-    setNuevoLeadIsla("");
-    setNuevoLeadSede("");
-    // El mes/año NO se resetea: si está añadiendo varios leads del mismo mes seguidos,
-    // no tiene que volver a seleccionarlo cada vez.
-    showToast(`${cliente || "Lead"} añadido`);
-  }, [nuevoLeadCliente, nuevoLeadTelefono, nuevoLeadGestorId, nuevoLeadVendorId, nuevoLeadIsla, nuevoLeadSede, nuevoLeadMesAnio, addLeadSinCita, showToast]);
-
   const handleRemoveLeadSinCita = useCallback(
     async (id) => {
       await removeLeadSinCita(id);
@@ -1195,15 +1196,56 @@ export default function AgendaVendedores() {
     });
   }, [leadsSinCita, vendedores, gestores, ventasParaTelefono, todosLosRegistros]);
 
+  // Convierte cada cita real de la agenda (de cualquier semana, no solo la que se está viendo)
+  // en un registro con la misma forma que los del Excel y los leads sin cita, para que el
+  // informe de KPIs refleje también el trabajo del día a día, no solo lo que se sube por Excel.
+  // Las citas canceladas no se cuentan: nunca llegaron a ser una venta potencial real.
+  const registrosDeCitasAgenda = useMemo(() => {
+    return todasLasCitas
+      .filter((c) => c.estado !== "cancelada" && c.telefono)
+      .map((c) => {
+        const v = vendedores.find((vv) => vv.id === c.vendorId);
+        const g = gestores.find((gg) => gg.id === c.gestorId);
+        const matches = ventasParaTelefono(c.telefono);
+        const columnaEstadoExiste = todosLosRegistros.some((r) => r.vendido !== null && r.vendido !== undefined);
+        const vendido = matches.length === 0
+          ? null
+          : columnaEstadoExiste
+            ? (matches.some((m) => m.vendido === true) ? true : matches.some((m) => m.vendido === false) ? false : null)
+            : true;
+        let fecha = null;
+        try {
+          const monday = new Date(c.weekKey);
+          if (!isNaN(monday)) fecha = addDays(monday, c.day);
+        } catch {
+          fecha = null;
+        }
+        const mesAnio = fecha ? `${fecha.getFullYear()}-${String(fecha.getMonth() + 1).padStart(2, "0")}` : "";
+        return {
+          phone: normalizePhone(c.telefono),
+          date: fecha,
+          mesAnio,
+          vendedor: v?.nombre || "",
+          gestorLead: g?.nombre || "",
+          coche: "",
+          modelo: matches[0]?.modelo || matches[0]?.coche || "",
+          isla: v?.isla || matches[0]?.isla || "",
+          sede: v?.sede || matches[0]?.sede || "",
+          cliente: c.cliente || matches[0]?.cliente || "",
+          vendido,
+        };
+      });
+  }, [todasLasCitas, vendedores, gestores, ventasParaTelefono, todosLosRegistros]);
+
   // ---------- Datos combinados y deduplicados (histórico + cotejo + leads sin cita) ----------
   // Esto se calcula una sola vez, independientemente de los filtros del informe.
   const registrosUnicosCombinados = useMemo(() => {
-    const registrosCombinados = [...todosLosRegistros, ...registrosDeLeadsSinCita];
+    const registrosCombinados = [...todosLosRegistros, ...registrosDeLeadsSinCita, ...registrosDeCitasAgenda];
     if (registrosCombinados.length === 0) return [];
 
-    // Si el mismo teléfono aparece en varios orígenes (p.ej. una cita del histórico que luego
-    // se vuelve a ver en un cotejo posterior, o un lead sin cita que coincide con una fila del
-    // Excel), evitamos contarla dos veces en los KPIs. Nos quedamos con un registro por
+    // Si el mismo teléfono aparece en varios orígenes (p.ej. una cita real de la agenda que
+    // luego también aparece en el Excel de cotejo, o un lead sin cita que coincide con una fila
+    // del Excel), evitamos contarla dos veces en los KPIs. Nos quedamos con un registro por
     // teléfono, priorizando el que confirme una venta.
     const porTelefono = new Map();
     registrosCombinados.forEach((r) => {
@@ -1219,7 +1261,47 @@ export default function AgendaVendedores() {
     // no se pueden cotejar por teléfono, pero igualmente deben contar en el informe.
     const sinTelefono = registrosCombinados.filter((r) => !r.phone);
     return [...Array.from(porTelefono.values()), ...sinTelefono];
-  }, [todosLosRegistros, registrosDeLeadsSinCita]);
+  }, [todosLosRegistros, registrosDeLeadsSinCita, registrosDeCitasAgenda]);
+
+  const handleAddLeadSinCita = useCallback(async () => {
+    const cliente = nuevoLeadCliente.trim();
+    const telefono = nuevoLeadTelefono.trim();
+    if (!cliente && !telefono) return;
+
+    const telNormalizado = normalizePhone(telefono);
+    if (telNormalizado) {
+      const yaExiste = registrosUnicosCombinados.find((r) => r.phone === telNormalizado);
+      if (yaExiste) {
+        const confirma = window.confirm(
+          `Este teléfono ya existe registrado para "${yaExiste.cliente || "sin nombre"}"${yaExiste.vendedor ? ` (vendedor: ${yaExiste.vendedor})` : ""}.\n\n¿Quieres añadirlo igualmente? (por ejemplo, si es una visita o gestión distinta del mismo cliente)`
+        );
+        if (!confirma) return;
+      }
+    }
+
+    const nuevo = {
+      id: genId(),
+      cliente,
+      telefono,
+      gestorId: nuevoLeadGestorId || "",
+      vendorId: nuevoLeadVendorId || "",
+      isla: nuevoLeadIsla || "",
+      sede: nuevoLeadSede || "",
+      mesAnio: nuevoLeadMesAnio || "",
+      creadoEn: new Date().toISOString(),
+      origen: "manual",
+    };
+    await addLeadSinCita(nuevo);
+    setNuevoLeadCliente("");
+    setNuevoLeadTelefono("");
+    setNuevoLeadGestorId("");
+    setNuevoLeadVendorId("");
+    setNuevoLeadIsla("");
+    setNuevoLeadSede("");
+    // El mes/año NO se resetea: si está añadiendo varios leads del mismo mes seguidos,
+    // no tiene que volver a seleccionarlo cada vez.
+    showToast(`${cliente || "Lead"} añadido`);
+  }, [nuevoLeadCliente, nuevoLeadTelefono, nuevoLeadGestorId, nuevoLeadVendorId, nuevoLeadIsla, nuevoLeadSede, nuevoLeadMesAnio, addLeadSinCita, showToast, registrosUnicosCombinados]);
 
   // Si el conjunto combinado trae la columna de estado (CIERRE/vendido) con al menos un valor
   // explícito, asumimos que esa columna existe de verdad: una fila vacía entonces significa
@@ -1232,6 +1314,43 @@ export default function AgendaVendedores() {
   const esVendidaRecordGlobal = useCallback(
     (r) => (columnaEstadoExisteGlobal ? r.vendido === true : true),
     [columnaEstadoExisteGlobal]
+  );
+
+  // Leads sin cita con el mismo teléfono exacto repetidos entre sí (no contra el Excel ni
+  // contra citas reales, que tienen su propio ciclo de vida): probablemente la misma persona
+  // dada de alta dos veces por error, y candidatos a fusionar en uno solo.
+  const leadsDuplicados = useMemo(() => {
+    const porTelefono = new Map();
+    leadsSinCita.forEach((l) => {
+      const tel = normalizePhone(l.telefono);
+      if (!tel) return;
+      if (!porTelefono.has(tel)) porTelefono.set(tel, []);
+      porTelefono.get(tel).push(l);
+    });
+    return Array.from(porTelefono.values()).filter((grupo) => grupo.length > 1);
+  }, [leadsSinCita]);
+
+  // Fusiona un grupo de leads duplicados en uno solo: conserva el primero (el más antiguo) y
+  // completa los campos que tuviera vacíos con los datos de los demás, luego elimina el resto.
+  const fusionarLeadsDuplicados = useCallback(
+    async (grupo) => {
+      const ordenado = [...grupo].sort((a, b) => new Date(a.creadoEn || 0) - new Date(b.creadoEn || 0));
+      const principal = ordenado[0];
+      const resto = ordenado.slice(1);
+      const camposCompletados = {};
+      ["cliente", "gestorId", "vendorId", "isla", "sede", "mesAnio"].forEach((campo) => {
+        if (!principal[campo]) {
+          const conValor = resto.find((l) => l[campo]);
+          if (conValor) camposCompletados[campo] = conValor[campo];
+        }
+      });
+      if (Object.keys(camposCompletados).length > 0) {
+        await updateLeadSinCita(principal.id, camposCompletados);
+      }
+      await Promise.all(resto.map((l) => removeLeadSinCita(l.id)));
+      showToast(`Fusionados ${grupo.length} registros en uno solo`);
+    },
+    [updateLeadSinCita, removeLeadSinCita, showToast]
   );
 
   // Meses/años disponibles en todo el conjunto, para rellenar el filtro de mes del informe.
@@ -2080,6 +2199,34 @@ export default function AgendaVendedores() {
                     </div>
                   )}
 
+                  {leadsDuplicados.length > 0 && (
+                    <div style={styles.informeDuplicadosWrap}>
+                      <div style={styles.informeTablaTitulo}>
+                        <AlertCircle size={13} style={{ marginRight: 5, verticalAlign: -2 }} />
+                        Posibles duplicados en "Sin cita" ({leadsDuplicados.length})
+                      </div>
+                      <div style={styles.panelHint}>
+                        Mismo teléfono dado de alta más de una vez. Revisa si es la misma persona antes de fusionar — al fusionar se conserva el registro más antiguo y se completan los datos que le falten con los de los demás.
+                      </div>
+                      {leadsDuplicados.map((grupo) => (
+                        <div key={grupo[0].id} style={styles.informeDuplicadoGrupo}>
+                          <div style={{ flex: 1, minWidth: 0 }}>
+                            <div style={styles.cotejoPhone}>{grupo[0].telefono}</div>
+                            {grupo.map((l) => (
+                              <div key={l.id} style={styles.informeDuplicadoItem}>
+                                {l.cliente || "Sin nombre"}
+                                {l.mesAnio ? ` · ${mesAnioLabel(l.mesAnio)}` : ""}
+                              </div>
+                            ))}
+                          </div>
+                          <button onClick={() => fusionarLeadsDuplicados(grupo)} style={styles.secondaryBtnSmall}>
+                            Fusionar en uno
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
                   {resumenVentas.porMes.length > 1 && (
                     <div style={styles.informeChartWrap}>
                       <div style={styles.informeTablaHeaderRow}>
@@ -2811,6 +2958,9 @@ const styles = {
   informeFiltroLabel: { fontSize: 12, color: "#8A7B5C", fontWeight: 500 },
   informeChartWrap: { background: "#fff", border: "1px solid #EBE4D3", borderRadius: 10, padding: "16px 18px", marginBottom: 26, maxWidth: 700 },
   informeAvisoDatos: { display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: "#A14B2C", background: "#FBEDE6", padding: "7px 11px", borderRadius: 8, marginBottom: 18, maxWidth: 600 },
+  informeDuplicadosWrap: { marginBottom: 26, maxWidth: 600, background: "#FBF1DE", border: "1px solid #E8D2A8", borderRadius: 10, padding: "14px 16px" },
+  informeDuplicadoGrupo: { display: "flex", alignItems: "center", gap: 10, background: "#fff", borderRadius: 8, padding: "9px 12px", marginTop: 8 },
+  informeDuplicadoItem: { fontSize: 12, color: "#5C5240" },
   informeTablaHeaderRow: { display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 },
   informeOrdenToggle: { display: "flex", gap: 4, background: "#F1EAD9", padding: 3, borderRadius: 7 },
   informeOrdenBtn: { border: "none", background: "transparent", color: "#7A6B4C", fontSize: 11, fontWeight: 500, padding: "4px 9px", borderRadius: 5 },

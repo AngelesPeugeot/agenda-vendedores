@@ -32,6 +32,7 @@ import {
   UserCog,
   UserPlus,
   Download,
+  Settings,
 } from "lucide-react";
 import * as XLSX from "xlsx";
 import {
@@ -39,6 +40,9 @@ import {
   Bar,
   LineChart,
   Line,
+  PieChart,
+  Pie,
+  Cell,
   XAxis,
   YAxis,
   CartesianGrid,
@@ -116,6 +120,10 @@ const ISLAS_SEDES = {
   "La Palma": ["La Palma"],
 };
 const ISLAS = Object.keys(ISLAS_SEDES);
+
+// Vistas de gestión puntual (no son del día a día), agrupadas bajo el menú "Gestión"
+// para no competir visualmente con Agenda y Sin cita, que son las de uso diario.
+const VISTAS_GESTION = ["turnos", "vendedores", "gestores", "ventas", "informe"];
 
 // Asigna un color a cada sede dentro de su isla, ciclando si hay más sedes que tonos.
 function colorParaSede(isla, sede) {
@@ -301,6 +309,7 @@ function addDays(date, n) {
 //   vendedores/{id}            -> {nombre, isla, sede}
 //   gestores/{id}               -> {nombre}  (gestor lead: crea la cita, distinto del vendedor)
 //   leadsSinCita/{id}            -> {cliente, telefono, gestorId, vendorId, isla, sede, creadoEn}
+//   vacaciones/{id}               -> {vendorId, desde, hasta, origen}  (desde/hasta en formato YYYY-MM-DD)
 //   turnos/{weekKey}_{vendorId} -> {weekKey, vendorId, dias: {0:[...],...}}
 //   citas/{id}                  -> {weekKey, vendorId, gestorId, day, hour, cliente, telefono}
 //   ventas/historico             -> {fileName, uploadedAt, records}  (se sube una vez, KPIs anuales)
@@ -401,6 +410,64 @@ function useGestoresSync() {
   }, []);
 
   return { gestores, loadingGestores, addGestor, removeGestor };
+}
+
+// Vacaciones: rangos de fechas en los que un vendedor no está disponible. Se guardan de forma
+// permanente (no por semana), y se usan para excluir automáticamente al vendedor de la agenda
+// durante esos días, tanto si se añaden a mano como si vienen importadas de un Excel.
+function useVacacionesSync() {
+  const [vacaciones, setVacaciones] = useState([]);
+  const [loadingVacaciones, setLoadingVacaciones] = useState(true);
+
+  useEffect(() => {
+    if (!firebaseDisponible) {
+      setLoadingVacaciones(false);
+      return;
+    }
+    const vacacionesRef = ref(db, "vacaciones");
+    const unsub = onValue(vacacionesRef, (snap) => {
+      const data = snap.val() || {};
+      const list = Object.entries(data).map(([id, v]) => ({ id, ...v }));
+      setVacaciones(list);
+      setLoadingVacaciones(false);
+    }, (err) => {
+      console.error("Error sincronizando vacaciones", err);
+      setLoadingVacaciones(false);
+    });
+    return () => unsub();
+  }, []);
+
+  const addVacacion = useCallback(async (vacacion) => {
+    if (!firebaseDisponible) {
+      setVacaciones((prev) => [...prev, vacacion]);
+      return;
+    }
+    const { id, ...resto } = vacacion;
+    await set(ref(db, `vacaciones/${id}`), resto);
+  }, []);
+
+  const addVacacionesEnLote = useCallback(async (lista) => {
+    if (!firebaseDisponible) {
+      setVacaciones((prev) => [...prev, ...lista]);
+      return;
+    }
+    const updates = {};
+    lista.forEach((vac) => {
+      const { id, ...resto } = vac;
+      updates[`vacaciones/${id}`] = resto;
+    });
+    await update(ref(db), updates);
+  }, []);
+
+  const removeVacacion = useCallback(async (id) => {
+    if (!firebaseDisponible) {
+      setVacaciones((prev) => prev.filter((v) => v.id !== id));
+      return;
+    }
+    await remove(ref(db, `vacaciones/${id}`));
+  }, []);
+
+  return { vacaciones, loadingVacaciones, addVacacion, addVacacionesEnLote, removeVacacion };
 }
 
 // Leads sin cita: clientes que reciben presupuesto o se derivan directamente a un vendedor
@@ -615,9 +682,11 @@ function useVentasSync(tipo) {
 export default function AgendaVendedores() {
   const [weekStart, setWeekStart] = useState(() => getMonday(new Date()));
   const weekKey = useMemo(() => fmtWeekKey(weekStart), [weekStart]);
+  const weekDates = useMemo(() => DIAS.map((_, i) => addDays(weekStart, i)), [weekStart]);
 
   const { vendedores, loading, addVendedor, removeVendedor, updateVendedor } = useVendedoresSync();
   const { gestores, loadingGestores, addGestor, removeGestor } = useGestoresSync();
+  const { vacaciones, addVacacion, addVacacionesEnLote, removeVacacion } = useVacacionesSync();
   const { leadsSinCita, addLeadSinCita, addLeadsSinCitaEnLote, updateLeadSinCita, removeLeadSinCita } = useLeadsSinCitaSync();
   const { turnos, setTurnoVendorDia } = useTurnosSync(weekKey);
   const { citas, addCita, updateCita, removeCita } = useCitasSync(weekKey);
@@ -626,11 +695,29 @@ export default function AgendaVendedores() {
   const { ventas: ventasCotejo, guardarVentas: guardarVentasCotejo } = useVentasSync("cotejo");
 
   const [vista, setVista] = useState("agenda");
+  const [gestionMenuAbierto, setGestionMenuAbierto] = useState(false);
+  const gestionMenuRef = useRef(null);
+  useEffect(() => {
+    if (!gestionMenuAbierto) return;
+    const cerrarSiFuera = (e) => {
+      if (gestionMenuRef.current && !gestionMenuRef.current.contains(e.target)) {
+        setGestionMenuAbierto(false);
+      }
+    };
+    document.addEventListener("mousedown", cerrarSiFuera);
+    return () => document.removeEventListener("mousedown", cerrarSiFuera);
+  }, [gestionMenuAbierto]);
   const [modalCita, setModalCita] = useState(null);
   const [nuevoVendedorNombre, setNuevoVendedorNombre] = useState("");
   const [nuevoVendedorIsla, setNuevoVendedorIsla] = useState(ISLAS[0]);
   const [nuevoVendedorSede, setNuevoVendedorSede] = useState((ISLAS_SEDES[ISLAS[0]] || [])[0] || "");
   const [nuevoGestorNombre, setNuevoGestorNombre] = useState("");
+  const [nuevaVacacionVendorId, setNuevaVacacionVendorId] = useState("");
+  const [nuevaVacacionDesde, setNuevaVacacionDesde] = useState("");
+  const [nuevaVacacionHasta, setNuevaVacacionHasta] = useState("");
+  const [errorVacaciones, setErrorVacaciones] = useState(null);
+  const [subiendoVacaciones, setSubiendoVacaciones] = useState(false);
+  const fileInputVacacionesRef = useRef(null);
   const [nuevoLeadCliente, setNuevoLeadCliente] = useState("");
   const [nuevoLeadTelefono, setNuevoLeadTelefono] = useState("");
   const [nuevoLeadGestorId, setNuevoLeadGestorId] = useState("");
@@ -702,6 +789,122 @@ export default function AgendaVendedores() {
     [gestores, removeGestor, showToast]
   );
 
+  // ---------- Vacaciones ----------
+  const handleAddVacacion = useCallback(async () => {
+    setErrorVacaciones(null);
+    if (!nuevaVacacionVendorId) {
+      setErrorVacaciones("Elige un vendedor.");
+      return;
+    }
+    if (!nuevaVacacionDesde || !nuevaVacacionHasta) {
+      setErrorVacaciones("Indica la fecha de inicio y la de fin.");
+      return;
+    }
+    if (nuevaVacacionHasta < nuevaVacacionDesde) {
+      setErrorVacaciones("La fecha de fin no puede ser anterior a la de inicio.");
+      return;
+    }
+    const v = vendedores.find((vv) => vv.id === nuevaVacacionVendorId);
+    await addVacacion({
+      id: genId(),
+      vendorId: nuevaVacacionVendorId,
+      desde: nuevaVacacionDesde,
+      hasta: nuevaVacacionHasta,
+      origen: "manual",
+    });
+    setNuevaVacacionVendorId("");
+    setNuevaVacacionDesde("");
+    setNuevaVacacionHasta("");
+    showToast(`Vacaciones añadidas${v ? ` para ${v.nombre}` : ""}`);
+  }, [nuevaVacacionVendorId, nuevaVacacionDesde, nuevaVacacionHasta, vendedores, addVacacion, showToast]);
+
+  const handleRemoveVacacion = useCallback(
+    async (id) => {
+      await removeVacacion(id);
+      showToast("Vacaciones eliminadas");
+    },
+    [removeVacacion, showToast]
+  );
+
+  // Importa vacaciones desde un Excel/CSV con columnas de vendedor, fecha de inicio y fecha de
+  // fin. Empareja el vendedor por nombre exacto (sin distinguir mayúsculas/tildes con espacios);
+  // las filas cuyo vendedor no se reconozca se omiten y se avisa cuántas fueron.
+  const handleImportarVacacionesExcel = useCallback(
+    async (file) => {
+      if (!file) return;
+      setSubiendoVacaciones(true);
+      setErrorVacaciones(null);
+      try {
+        const buf = await file.arrayBuffer();
+        const wb = XLSX.read(buf, { type: "array", cellDates: true });
+        const sheet = wb.Sheets[wb.SheetNames[0]];
+        const rows = XLSX.utils.sheet_to_json(sheet, { defval: "" });
+
+        if (rows.length === 0) {
+          setErrorVacaciones("El archivo no tiene filas con datos.");
+          setSubiendoVacaciones(false);
+          return;
+        }
+
+        const keys = Object.keys(rows[0]);
+        const findKey = (...patterns) =>
+          keys.find((k) => patterns.some((p) => k.toLowerCase().replace(/[^a-z0-9]/g, "").includes(p)));
+
+        const kVendedor = findKey("vendedor", "comercial", "asesor", "nombre");
+        const kDesde = findKey("desde", "inicio", "fechainicio", "fechadesde", "start");
+        const kHasta = findKey("hasta", "fin", "fechafin", "fechahasta");
+
+        if (!kVendedor || !kDesde || !kHasta) {
+          setErrorVacaciones('No he encontrado columnas de vendedor, fecha de inicio y fecha de fin. Revisa que el Excel tenga cabeceras como "Vendedor", "Desde" y "Hasta".');
+          setSubiendoVacaciones(false);
+          return;
+        }
+
+        const normalizaNombre = (s) => String(s || "").trim().toLowerCase();
+        const aFechaISO = (val) => {
+          const d = parseAnyDate(val);
+          return d ? d.toISOString().slice(0, 10) : "";
+        };
+
+        let sinReconocer = 0;
+        const nuevasVacaciones = [];
+        rows.forEach((r) => {
+          const nombreVendedor = String(r[kVendedor] || "").trim();
+          const desde = aFechaISO(r[kDesde]);
+          const hasta = aFechaISO(r[kHasta]);
+          if (!nombreVendedor || !desde || !hasta) return;
+          const v = vendedores.find((vv) => normalizaNombre(vv.nombre) === normalizaNombre(nombreVendedor));
+          if (!v) {
+            sinReconocer += 1;
+            return;
+          }
+          nuevasVacaciones.push({
+            id: genId(),
+            vendorId: v.id,
+            desde: desde <= hasta ? desde : hasta,
+            hasta: desde <= hasta ? hasta : desde,
+            origen: "excel",
+          });
+        });
+
+        if (nuevasVacaciones.length > 0) {
+          await addVacacionesEnLote(nuevasVacaciones);
+        }
+        showToast(
+          sinReconocer > 0
+            ? `${nuevasVacaciones.length} vacaciones importadas · ${sinReconocer} filas con vendedor no reconocido`
+            : `${nuevasVacaciones.length} vacaciones importadas`
+        );
+      } catch (e) {
+        console.error(e);
+        setErrorVacaciones("No he podido leer el archivo. Comprueba que sea un .xlsx o .csv válido.");
+      } finally {
+        setSubiendoVacaciones(false);
+      }
+    },
+    [vendedores, addVacacionesEnLote, showToast]
+  );
+
   // ---------- Leads sin cita (presupuesto / derivados directamente a vendedor) ----------
   const handleRemoveLeadSinCita = useCallback(
     async (id) => {
@@ -763,6 +966,19 @@ export default function AgendaVendedores() {
     [turnos]
   );
 
+  // Comprueba si un vendedor está de vacaciones en una fecha concreta (comparando por día,
+  // ignorando la hora). Las fechas de vacaciones se guardan como "YYYY-MM-DD".
+  const estaDeVacaciones = useCallback(
+    (vendorId, fecha) => {
+      if (!fecha) return false;
+      const fechaStr = fecha.toISOString().slice(0, 10);
+      return vacaciones.some(
+        (v) => v.vendorId === vendorId && v.desde <= fechaStr && fechaStr <= v.hasta
+      );
+    },
+    [vacaciones]
+  );
+
   const setBulkTurno = useCallback(
     async (vendorId, dayIdx, tramo) => {
       const actual = { ...(turnos[vendorId] || {}) };
@@ -796,8 +1012,11 @@ export default function AgendaVendedores() {
 
   // ---------- Citas ----------
   const vendoresDisponibles = useCallback(
-    (dayIdx, hour) => vendedoresFiltrados.filter((v) => isWorking(v.id, dayIdx, hour)),
-    [vendedoresFiltrados, isWorking]
+    (dayIdx, hour) => {
+      const fecha = weekDates[dayIdx];
+      return vendedoresFiltrados.filter((v) => isWorking(v.id, dayIdx, hour) && !estaDeVacaciones(v.id, fecha));
+    },
+    [vendedoresFiltrados, isWorking, estaDeVacaciones, weekDates]
   );
 
   const citasDeVendorEnSemana = useCallback(
@@ -1083,7 +1302,6 @@ export default function AgendaVendedores() {
     setWeekStart((prev) => addDays(prev, delta * 7));
   }, []);
 
-  const weekDates = useMemo(() => DIAS.map((_, i) => addDays(weekStart, i)), [weekStart]);
   const slots = useMemo(() => slotsDia(), []);
 
   const citasActivas = useMemo(() => citas.filter((c) => c.estado !== "cancelada"), [citas]);
@@ -1156,6 +1374,18 @@ export default function AgendaVendedores() {
   const maxCarga = Math.max(1, ...Object.values(cargaPorVendedor));
   const minCarga = vendedores.length ? Math.min(...Object.values(cargaPorVendedor)) : 0;
   const desbalanceado = vendedores.length > 1 && maxCarga - minCarga >= 2;
+
+  // Vendedores con algún día de vacaciones dentro de la semana que se está viendo, para
+  // avisar visualmente en la leyenda de la agenda aunque no ocupen ningún slot concreto.
+  const vendedoresDeVacacionesEstaSemana = useMemo(() => {
+    const set = new Set();
+    weekDates.forEach((fecha) => {
+      vendedores.forEach((v) => {
+        if (estaDeVacaciones(v.id, fecha)) set.add(v.id);
+      });
+    });
+    return set;
+  }, [weekDates, vendedores, estaDeVacaciones]);
 
   const citasPorGestor = useMemo(() => {
     const map = {};
@@ -1416,7 +1646,17 @@ export default function AgendaVendedores() {
       ? registrosUnicos.filter((r) => r.vendido === false)
       : [];
     const totalVendidos = vendidos.length;
+    const totalNoVendidos = noVendidos.length;
+    const totalSinDecidir = totalRegistros - totalVendidos - totalNoVendidos;
     const tasaConversion = totalRegistros > 0 ? Math.round((totalVendidos / totalRegistros) * 100) : 0;
+
+    // Datos listos para el gráfico donut de estado general (solo se incluyen los que tengan
+    // algún registro, para no mostrar segmentos vacíos en la leyenda).
+    const datosDonut = [
+      { nombre: "Vendido", valor: totalVendidos, color: "#4F9B72" },
+      { nombre: "No vendido", valor: totalNoVendidos, color: "#C45A2E" },
+      { nombre: "Sin decidir", valor: totalSinDecidir, color: "#D8CFB8" },
+    ].filter((d) => d.valor > 0);
 
     const agrupar = (campo) => {
       const map = {};
@@ -1462,7 +1702,13 @@ export default function AgendaVendedores() {
       }
     });
     const porMes = Object.entries(porMesMap)
-      .map(([mesAnio, datos]) => ({ mesAnio, label: mesAnioLabel(mesAnio), ...datos, ...datos.porIsla }))
+      .map(([mesAnio, datos]) => ({
+        mesAnio,
+        label: mesAnioLabel(mesAnio),
+        ...datos,
+        ...datos.porIsla,
+        tasaConversion: datos.total > 0 ? Math.round((datos.vendidos / datos.total) * 100) : 0,
+      }))
       .sort((a, b) => (a.mesAnio === "Sin mes" ? 1 : b.mesAnio === "Sin mes" ? -1 : a.mesAnio.localeCompare(b.mesAnio)));
 
     const fechasValidas = registrosUnicos.map((r) => r.date).filter(Boolean);
@@ -1472,7 +1718,9 @@ export default function AgendaVendedores() {
     return {
       totalRegistros,
       totalVendidos,
-      totalNoVendidos: noVendidos.length,
+      totalNoVendidos,
+      totalSinDecidir,
+      datosDonut,
       tasaConversion,
       sinGestor,
       sinVendedor,
@@ -1572,24 +1820,39 @@ export default function AgendaVendedores() {
             <button onClick={() => setVista("agenda")} style={vista === "agenda" ? styles.tabActive : styles.tab}>
               <Calendar size={15} /> Agenda
             </button>
-            <button onClick={() => setVista("turnos")} style={vista === "turnos" ? styles.tabActive : styles.tab}>
-              <Clock size={15} /> Turnos
-            </button>
-            <button onClick={() => setVista("vendedores")} style={vista === "vendedores" ? styles.tabActive : styles.tab}>
-              <Users size={15} /> Vendedores
-            </button>
-            <button onClick={() => setVista("gestores")} style={vista === "gestores" ? styles.tabActive : styles.tab}>
-              <UserCog size={15} /> Gestores
-            </button>
             <button onClick={() => setVista("sincita")} style={vista === "sincita" ? styles.tabActive : styles.tab}>
               <UserPlus size={15} /> Sin cita
             </button>
-            <button onClick={() => setVista("ventas")} style={vista === "ventas" ? styles.tabActive : styles.tab}>
-              <CarFront size={15} /> Ventas
-            </button>
-            <button onClick={() => setVista("informe")} style={vista === "informe" ? styles.tabActive : styles.tab}>
-              <BarChart3 size={15} /> Informe
-            </button>
+            <div style={styles.gestionMenuWrap} ref={gestionMenuRef}>
+              <button
+                onClick={() => setGestionMenuAbierto((v) => !v)}
+                style={VISTAS_GESTION.includes(vista) ? styles.tabActive : styles.tab}
+              >
+                <Settings size={15} /> Gestión <ChevronDown size={13} style={{ opacity: 0.6 }} />
+              </button>
+              {gestionMenuAbierto && (
+                <div style={styles.gestionMenuDropdown}>
+                  {[
+                    { key: "turnos", icon: Clock, label: "Turnos" },
+                    { key: "vendedores", icon: Users, label: "Vendedores" },
+                    { key: "gestores", icon: UserCog, label: "Gestores" },
+                    { key: "ventas", icon: CarFront, label: "Ventas" },
+                    { key: "informe", icon: BarChart3, label: "Informe" },
+                  ].map(({ key, icon: Icon, label }) => (
+                    <button
+                      key={key}
+                      onClick={() => {
+                        setVista(key);
+                        setGestionMenuAbierto(false);
+                      }}
+                      style={vista === key ? styles.gestionMenuItemActive : styles.gestionMenuItem}
+                    >
+                      <Icon size={14} /> {label}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
           </div>
         </div>
 
@@ -1949,6 +2212,73 @@ export default function AgendaVendedores() {
 
       {vendedores.length > 0 && vista === "turnos" && (
         <div style={styles.panel}>
+          <div style={styles.panelTitle}>Vacaciones</div>
+          <div style={styles.panelHint}>
+            Los días marcados aquí hacen que el vendedor no aparezca disponible en la agenda, aunque su horario habitual diga que trabaja.
+          </div>
+
+          <div style={styles.leadFormGrid}>
+            <select value={nuevaVacacionVendorId} onChange={(e) => setNuevaVacacionVendorId(e.target.value)} style={styles.select}>
+              <option value="">Vendedor…</option>
+              {vendedores.map((v) => (
+                <option key={v.id} value={v.id}>{v.nombre}</option>
+              ))}
+            </select>
+            <span style={styles.informeFiltroLabel}>Desde</span>
+            <input type="date" value={nuevaVacacionDesde} onChange={(e) => setNuevaVacacionDesde(e.target.value)} style={styles.select} />
+            <span style={styles.informeFiltroLabel}>Hasta</span>
+            <input type="date" value={nuevaVacacionHasta} onChange={(e) => setNuevaVacacionHasta(e.target.value)} style={styles.select} />
+            <button onClick={handleAddVacacion} style={styles.primaryBtn}>
+              <Plus size={16} /> Añadir
+            </button>
+          </div>
+
+          <input
+            ref={fileInputVacacionesRef}
+            type="file"
+            accept=".xlsx,.xls,.csv"
+            style={{ display: "none" }}
+            onChange={(e) => handleImportarVacacionesExcel(e.target.files?.[0])}
+          />
+          <button onClick={() => fileInputVacacionesRef.current?.click()} disabled={subiendoVacaciones} style={styles.secondaryBtnSmall}>
+            <Upload size={12} /> {subiendoVacaciones ? "Leyendo archivo…" : "Importar desde Excel (columnas: Vendedor, Desde, Hasta)"}
+          </button>
+
+          {errorVacaciones && <div style={{ ...styles.noVendorWarn, marginTop: 10 }}>{errorVacaciones}</div>}
+
+          <div style={{ ...styles.vendorList, marginTop: 16 }}>
+            {vacaciones.length === 0 ? (
+              <div style={styles.panelHint}>Aún no hay vacaciones registradas.</div>
+            ) : (
+              [...vacaciones]
+                .sort((a, b) => (b.hasta || "").localeCompare(a.hasta || ""))
+                .map((vac) => {
+                  const v = vendedores.find((vv) => vv.id === vac.vendorId);
+                  const hoyStr = new Date().toISOString().slice(0, 10);
+                  const enCurso = vac.desde <= hoyStr && hoyStr <= vac.hasta;
+                  const pasada = vac.hasta < hoyStr;
+                  return (
+                    <div key={vac.id} style={{ ...styles.cotejoRow, borderLeftColor: enCurso ? "#4F9B72" : "#E5E0D4", opacity: pasada ? 0.55 : 1 }}>
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={styles.cotejoName}>{v?.nombre || "Vendedor eliminado"}</div>
+                        <div style={styles.cotejoMeta}>
+                          {fmtDateShort(new Date(vac.desde))} — {fmtDateShort(new Date(vac.hasta))}
+                          {enCurso ? " · En curso" : pasada ? " · Finalizada" : " · Próxima"}
+                        </div>
+                      </div>
+                      <button onClick={() => handleRemoveVacacion(vac.id)} style={styles.iconBtn} aria-label="Eliminar vacaciones">
+                        <Trash2 size={15} />
+                      </button>
+                    </div>
+                  );
+                })
+            )}
+          </div>
+        </div>
+      )}
+
+      {vendedores.length > 0 && vista === "turnos" && (
+        <div style={styles.panel}>
           <div style={styles.panelTitle}>Turnos rotativos de la semana</div>
           <div style={styles.panelHint}>
             Escribe el horario de cada vendedor como texto, por ejemplo <strong>9:00-13:30, 16:30-20:00</strong>. El de lunes a viernes se aplica a los 5 días de golpe; el sábado es independiente. Deja el campo vacío para marcar que no trabaja ese día.
@@ -2169,25 +2499,60 @@ export default function AgendaVendedores() {
                     </div>
                   )}
 
-                  <div style={styles.informeStatsRow}>
-                    <div style={styles.informeStatCard}>
-                      <div style={styles.informeStatNumber}>{resumenVentas.totalRegistros}</div>
-                      <div style={styles.informeStatLabel}>Registros totales</div>
+                  <div style={styles.informeResumenGrid}>
+                    <div style={styles.informeStatsCol}>
+                      <div style={styles.informeStatsRow}>
+                        <div style={styles.informeStatCard}>
+                          <div style={styles.informeStatNumber}>{resumenVentas.totalRegistros}</div>
+                          <div style={styles.informeStatLabel}>Registros totales</div>
+                        </div>
+                        <div style={{ ...styles.informeStatCard, borderColor: "#4F9B72" }}>
+                          <div style={{ ...styles.informeStatNumber, color: "#2F5E3F" }}>{resumenVentas.totalVendidos}</div>
+                          <div style={styles.informeStatLabel}>Vendidos</div>
+                        </div>
+                        {resumenVentas.totalNoVendidos > 0 && (
+                          <div style={styles.informeStatCard}>
+                            <div style={styles.informeStatNumber}>{resumenVentas.totalNoVendidos}</div>
+                            <div style={styles.informeStatLabel}>No vendidos</div>
+                          </div>
+                        )}
+                        <div style={styles.informeStatCard}>
+                          <div style={styles.informeStatNumber}>{resumenVentas.tasaConversion}%</div>
+                          <div style={styles.informeStatLabel}>Tasa de conversión</div>
+                        </div>
+                      </div>
                     </div>
-                    <div style={{ ...styles.informeStatCard, borderColor: "#4F9B72" }}>
-                      <div style={{ ...styles.informeStatNumber, color: "#2F5E3F" }}>{resumenVentas.totalVendidos}</div>
-                      <div style={styles.informeStatLabel}>Vendidos</div>
-                    </div>
-                    {resumenVentas.totalNoVendidos > 0 && (
-                      <div style={styles.informeStatCard}>
-                        <div style={styles.informeStatNumber}>{resumenVentas.totalNoVendidos}</div>
-                        <div style={styles.informeStatLabel}>No vendidos</div>
+
+                    {resumenVentas.datosDonut.length > 0 && (
+                      <div style={styles.informeDonutWrap}>
+                        <div style={styles.informeTablaTitulo}>Distribución de estados</div>
+                        <PieChart width={200} height={170}>
+                          <Pie
+                            data={resumenVentas.datosDonut}
+                            dataKey="valor"
+                            nameKey="nombre"
+                            cx="50%"
+                            cy="50%"
+                            innerRadius={48}
+                            outerRadius={72}
+                            paddingAngle={2}
+                          >
+                            {resumenVentas.datosDonut.map((d, i) => (
+                              <Cell key={i} fill={d.color} />
+                            ))}
+                          </Pie>
+                          <Tooltip
+                            contentStyle={{ fontSize: 12, borderRadius: 8, border: "1px solid #EBE4D3" }}
+                            formatter={(value, name) => [value, name]}
+                          />
+                          <Legend
+                            iconType="circle"
+                            iconSize={9}
+                            wrapperStyle={{ fontSize: 11, paddingTop: 8 }}
+                          />
+                        </PieChart>
                       </div>
                     )}
-                    <div style={styles.informeStatCard}>
-                      <div style={styles.informeStatNumber}>{resumenVentas.tasaConversion}%</div>
-                      <div style={styles.informeStatLabel}>Tasa de conversión</div>
-                    </div>
                   </div>
 
                   {(resumenVentas.sinGestor > 0 || resumenVentas.sinVendedor > 0) && (
@@ -2248,7 +2613,7 @@ export default function AgendaVendedores() {
                           </div>
                         )}
                       </div>
-                      <ResponsiveContainer width="100%" height={260}>
+                      <ResponsiveContainer width="100%" height={220}>
                         {vistaGraficoMensual === "isla" && resumenVentas.islasPresentes.length > 1 ? (
                           <BarChart data={resumenVentas.porMes} margin={{ top: 10, right: 10, left: -10, bottom: 0 }}>
                             <CartesianGrid strokeDasharray="3 3" stroke="#EFE9DA" />
@@ -2257,14 +2622,7 @@ export default function AgendaVendedores() {
                             <Tooltip contentStyle={{ fontSize: 12, borderRadius: 8, border: "1px solid #EBE4D3" }} />
                             <Legend wrapperStyle={{ fontSize: 12 }} />
                             {resumenVentas.islasPresentes.map((isla) => (
-                              <Bar
-                                key={isla}
-                                dataKey={isla}
-                                name={isla}
-                                stackId="islas"
-                                fill={(PALETA_ISLAS[isla] || PALETA_ISLAS["Tenerife"]).hue}
-                                radius={[2, 2, 0, 0]}
-                              />
+                              <Bar key={isla} dataKey={isla} name={isla} stackId="islas" fill={(PALETA_ISLAS[isla] || PALETA_ISLAS["Tenerife"]).hue} radius={[2, 2, 0, 0]} />
                             ))}
                           </BarChart>
                         ) : (
@@ -2282,8 +2640,34 @@ export default function AgendaVendedores() {
                     </div>
                   )}
 
-                  <InformeTabla titulo="Por vendedor" filas={resumenVentas.porVendedor} />
-                  <InformeTabla titulo="Por gestor lead" filas={resumenVentas.porGestorLead} />
+                  {resumenVentas.porMes.length > 1 && (
+                    <div style={styles.informeChartWrap}>
+                      <div style={styles.informeTablaTitulo}>Evolución de conversión mensual</div>
+                      <ResponsiveContainer width="100%" height={180}>
+                        <LineChart data={resumenVentas.porMes} margin={{ top: 10, right: 10, left: -10, bottom: 0 }}>
+                          <CartesianGrid strokeDasharray="3 3" stroke="#EFE9DA" />
+                          <XAxis dataKey="label" tick={{ fontSize: 11, fill: "#8A7B5C" }} />
+                          <YAxis tick={{ fontSize: 11, fill: "#8A7B5C" }} unit="%" domain={[0, 100]} />
+                          <Tooltip
+                            contentStyle={{ fontSize: 12, borderRadius: 8, border: "1px solid #EBE4D3" }}
+                            formatter={(v) => [`${v}%`, "Conversión"]}
+                          />
+                          <Line
+                            type="monotone"
+                            dataKey="tasaConversion"
+                            name="Conversión"
+                            stroke="#C45A2E"
+                            strokeWidth={2.5}
+                            dot={{ r: 4, fill: "#C45A2E" }}
+                            activeDot={{ r: 6 }}
+                          />
+                        </LineChart>
+                      </ResponsiveContainer>
+                    </div>
+                  )}
+
+                  <InformeTabla titulo="Por vendedor" filas={resumenVentas.porVendedor} usarGrafico />
+                  <InformeTabla titulo="Por gestor lead" filas={resumenVentas.porGestorLead} usarGrafico />
                   <InformeTabla titulo="Por isla" filas={resumenVentas.porIsla} />
                   <InformeTabla titulo="Por modelo" filas={resumenVentas.porModelo} />
                 </>
@@ -2364,11 +2748,13 @@ export default function AgendaVendedores() {
             ) : (
               vendedoresFiltrados.map((v) => {
                 const c = colorParaSede(v.isla, v.sede);
+                const deVacaciones = vendedoresDeVacacionesEstaSemana.has(v.id);
                 return (
-                  <div key={v.id} style={styles.legendItem}>
+                  <div key={v.id} style={{ ...styles.legendItem, opacity: deVacaciones ? 0.55 : 1 }}>
                     <span style={{ ...styles.vendorDot, background: c.border }} />
                     <span style={styles.legendName}>{v.nombre}</span>
                     <span style={styles.legendLocation}>{v.sede}</span>
+                    {deVacaciones && <span style={styles.legendVacacionesTag}>De vacaciones</span>}
                     <span style={styles.legendBarWrap}>
                       <span
                         style={{
@@ -2416,7 +2802,7 @@ function FragmentRow({ children }) {
 // ---------- Tabla de desglose para el informe anual ----------
 // Permite alternar el orden entre volumen (vendidos) y tasa de conversión (%), y expandir
 // cada fila para ver el detalle de los registros concretos que la componen.
-function InformeTabla({ titulo, filas }) {
+function InformeTabla({ titulo, filas, usarGrafico }) {
   const [orden, setOrden] = useState("volumen");
   const [expandida, setExpandida] = useState(null);
 
@@ -2438,6 +2824,17 @@ function InformeTabla({ titulo, filas }) {
 
   const maxVendidos = Math.max(1, ...filas.map((f) => f.vendidos));
 
+  // Datos para el gráfico de barras horizontal, con la tasa de conversión ya calculada
+  // (recharts necesita los valores numéricos listos, no calculados al vuelo en el render).
+  const datosGrafico = useMemo(
+    () =>
+      filasOrdenadas.map((f) => ({
+        ...f,
+        tasa: f.total > 0 ? Math.round((f.vendidos / f.total) * 100) : 0,
+      })),
+    [filasOrdenadas]
+  );
+
   return (
     <div style={styles.informeTablaWrap}>
       <div style={styles.informeTablaHeaderRow}>
@@ -2457,30 +2854,79 @@ function InformeTabla({ titulo, filas }) {
           </button>
         </div>
       </div>
+
+      {usarGrafico && (
+        <div style={styles.informeBarrasHorizWrap}>
+          <ResponsiveContainer width="100%" height={Math.max(120, datosGrafico.length * 32)}>
+            <BarChart
+              data={datosGrafico}
+              layout="vertical"
+              margin={{ top: 4, right: 30, left: 10, bottom: 4 }}
+              barCategoryGap={6}
+            >
+              <CartesianGrid strokeDasharray="3 3" stroke="#EFE9DA" horizontal={false} />
+              <XAxis type="number" tick={{ fontSize: 11, fill: "#8A7B5C" }} allowDecimals={false} />
+              <YAxis
+                type="category"
+                dataKey="nombre"
+                width={120}
+                tick={{ fontSize: 11, fill: "#5C5240" }}
+                interval={0}
+              />
+              <Tooltip
+                contentStyle={{ fontSize: 12, borderRadius: 8, border: "1px solid #EBE4D3" }}
+                formatter={(value, name, props) =>
+                  orden === "conversion" ? [`${value}%`, "Conversión"] : [`${value} / ${props.payload.total}`, "Vendidos"]
+                }
+              />
+              <Bar
+                dataKey={orden === "conversion" ? "tasa" : "vendidos"}
+                radius={[0, 4, 4, 0]}
+                onClick={(data) => setExpandida(expandida === data.nombre ? null : data.nombre)}
+                cursor="pointer"
+              >
+                {datosGrafico.map((f, i) => (
+                  <Cell key={i} fill={expandida === f.nombre ? "#C45A2E" : "#4F9B72"} />
+                ))}
+              </Bar>
+            </BarChart>
+          </ResponsiveContainer>
+        </div>
+      )}
+
       <div style={styles.informeTablaRows}>
         {filasOrdenadas.map((f) => {
           const tasa = f.total > 0 ? Math.round((f.vendidos / f.total) * 100) : 0;
           const isExpanded = expandida === f.nombre;
           return (
             <div key={f.nombre}>
-              <button
-                onClick={() => setExpandida(isExpanded ? null : f.nombre)}
-                style={styles.informeTablaRowBtn}
-              >
-                <span style={styles.informeTablaNombre}>{f.nombre}</span>
-                <span style={styles.legendBarWrap}>
-                  <span
-                    style={{
-                      ...styles.legendBar,
-                      width: `${Math.max(6, (orden === "conversion" ? tasa : (f.vendidos / maxVendidos) * 100))}%`,
-                      background: "#4F9B72",
-                    }}
-                  />
-                </span>
-                <span style={styles.informeTablaCifras}>{f.vendidos}/{f.total}</span>
-                <span style={styles.informeTablaTasa}>{tasa}%</span>
-                <ChevronDown size={13} style={{ transform: isExpanded ? "rotate(180deg)" : "none", flexShrink: 0, color: "#A89B7E" }} />
-              </button>
+              {!usarGrafico && (
+                <button
+                  onClick={() => setExpandida(isExpanded ? null : f.nombre)}
+                  style={styles.informeTablaRowBtn}
+                >
+                  <span style={styles.informeTablaNombre}>{f.nombre}</span>
+                  <span style={styles.legendBarWrap}>
+                    <span
+                      style={{
+                        ...styles.legendBar,
+                        width: `${Math.max(6, (orden === "conversion" ? tasa : (f.vendidos / maxVendidos) * 100))}%`,
+                        background: "#4F9B72",
+                      }}
+                    />
+                  </span>
+                  <span style={styles.informeTablaCifras}>{f.vendidos}/{f.total}</span>
+                  <span style={styles.informeTablaTasa}>{tasa}%</span>
+                  <ChevronDown size={13} style={{ transform: isExpanded ? "rotate(180deg)" : "none", flexShrink: 0, color: "#A89B7E" }} />
+                </button>
+              )}
+              {usarGrafico && isExpanded && (
+                <div style={styles.informeTablaExpandidaLabel}>
+                  <span style={styles.informeTablaNombre}>{f.nombre}</span>
+                  <span style={styles.informeTablaCifras}>{f.vendidos}/{f.total}</span>
+                  <span style={styles.informeTablaTasa}>{tasa}%</span>
+                </div>
+              )}
               {isExpanded && (
                 <div style={styles.informeDetalleWrap}>
                   {(f.registros || []).map((r, i) => (
@@ -2860,6 +3306,10 @@ const styles = {
   tabs: { display: "flex", gap: 4, background: "#F1EAD9", padding: 4, borderRadius: 10 },
   tab: { display: "flex", alignItems: "center", gap: 6, border: "none", background: "transparent", color: "#7A6B4C", fontSize: 13, fontWeight: 500, padding: "7px 12px", borderRadius: 8 },
   tabActive: { display: "flex", alignItems: "center", gap: 6, border: "none", background: "#FFFFFF", color: "#C45A2E", fontSize: 13, fontWeight: 600, padding: "7px 12px", borderRadius: 8, boxShadow: "0 1px 3px rgba(0,0,0,0.08)" },
+  gestionMenuWrap: { position: "relative" },
+  gestionMenuDropdown: { position: "absolute", top: "calc(100% + 6px)", right: 0, background: "#fff", border: "1px solid #EBE4D3", borderRadius: 10, boxShadow: "0 8px 24px rgba(0,0,0,0.12)", padding: 6, minWidth: 170, zIndex: 40, display: "flex", flexDirection: "column", gap: 2 },
+  gestionMenuItem: { display: "flex", alignItems: "center", gap: 8, border: "none", background: "transparent", color: "#5C5240", fontSize: 13, fontWeight: 500, padding: "8px 10px", borderRadius: 7, textAlign: "left", width: "100%" },
+  gestionMenuItemActive: { display: "flex", alignItems: "center", gap: 8, border: "none", background: "#F1EAD9", color: "#C45A2E", fontSize: 13, fontWeight: 600, padding: "8px 10px", borderRadius: 7, textAlign: "left", width: "100%" },
   weekNav: { display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" },
   navBtn: { width: 30, height: 30, borderRadius: 8, border: "1px solid #E5E0D4", background: "#fff", display: "flex", alignItems: "center", justifyContent: "center", color: "#5C5240" },
   weekLabel: { fontSize: 13.5, fontWeight: 600, color: "#3D362A", minWidth: 190 },
@@ -2944,14 +3394,20 @@ const styles = {
   legendItem: { display: "flex", alignItems: "center", gap: 8 },
   legendName: { fontSize: 12, width: 100, flexShrink: 0, color: "#5C5240", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
   legendLocation: { fontSize: 11, color: "#A89B7E", width: 90, flexShrink: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
+  legendVacacionesTag: { fontSize: 10, fontWeight: 600, color: "#8A5E10", background: "#FBF1DE", padding: "2px 7px", borderRadius: 999, flexShrink: 0 },
   legendBarWrap: { flex: 1, height: 7, background: "#F1EAD9", borderRadius: 4, overflow: "hidden" },
   legendBar: { display: "block", height: "100%", borderRadius: 4 },
   legendCount: { fontSize: 12, fontWeight: 600, width: 20, textAlign: "right", color: "#5C5240" },
 
-  informeStatsRow: { display: "flex", gap: 12, flexWrap: "wrap", marginBottom: 26 },
-  informeStatCard: { border: "1px solid #EBE4D3", borderRadius: 10, padding: "14px 18px", background: "#fff", minWidth: 120 },
+  informeResumenGrid: { display: "flex", gap: 24, flexWrap: "wrap", alignItems: "flex-start", marginBottom: 26 },
+  informeStatsCol: { flex: 1, minWidth: 240 },
+  informeStatsRow: { display: "flex", gap: 12, flexWrap: "wrap", marginBottom: 0 },
+  informeStatCard: { border: "1px solid #EBE4D3", borderRadius: 10, padding: "14px 18px", background: "#fff", minWidth: 110 },
   informeStatNumber: { fontFamily: "var(--font-display)", fontSize: 24, fontWeight: 600, color: "#3D362A" },
   informeStatLabel: { fontSize: 11.5, color: "#8A7B5C", marginTop: 2 },
+  informeDonutWrap: { background: "#fff", border: "1px solid #EBE4D3", borderRadius: 10, padding: "14px 18px", flexShrink: 0 },
+  informeBarrasHorizWrap: { marginBottom: 12 },
+  informeTablaExpandidaLabel: { display: "flex", alignItems: "center", gap: 8, padding: "3px 0 6px", marginLeft: 4 },
 
   informeTablaWrap: { marginBottom: 24, maxWidth: 620 },
   informeTablaTitulo: { fontSize: 13.5, fontWeight: 600, marginBottom: 10, color: "#3D362A" },

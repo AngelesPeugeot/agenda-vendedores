@@ -146,6 +146,56 @@ function normalizePhone(raw) {
   return digits;
 }
 
+// ---------- Emparejamiento robusto de nombres de personas ----------
+// Algunos listados de origen (CRM, exportaciones antiguas) usan formatos de nombre distintos
+// a los que se usan al crear vendedores/gestores en la app: mayúsculas, apellidos con guión
+// bajo tipo "usuario" ("GUTIERREZ_PEREZ JONAY"), orden nombre/apellidos invertido, o solo un
+// apellido en vez de dos. Estas funciones intentan reconocer que es la misma persona aunque el
+// texto no coincida exactamente, para que el informe agrupe bien en vez de crear una categoría
+// nueva por cada variante de formato.
+function normalizarNombrePersona(s) {
+  return String(s || "")
+    .normalize("NFD").replace(/[\u0300-\u036f]/g, "") // quita acentos
+    .toLowerCase()
+    .replace(/[_,.]/g, " ") // guiones bajos y puntuación como separadores de palabra
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function tokensNombrePersona(s) {
+  return normalizarNombrePersona(s).split(" ").filter(Boolean);
+}
+
+// Busca en `lista` (de objetos con un campo de nombre, p.ej. vendedores o gestores) una persona
+// que coincida con `texto`, admitiendo formato distinto. Primero intenta coincidencia exacta
+// normalizada; si no la hay, busca por solapamiento de palabras (nombre + al menos un apellido
+// en común, en cualquier orden), exigiendo al menos 2 palabras compartidas para evitar
+// confundir a dos personas que solo comparten el nombre de pila. Devuelve el nombre "canónico"
+// tal como está en la lista si encuentra una coincidencia razonable, o null si no la encuentra.
+function emparejarNombrePersona(texto, lista, campoNombre = "nombre") {
+  const tokensTexto = new Set(tokensNombrePersona(texto));
+  if (tokensTexto.size === 0 || !lista || lista.length === 0) return null;
+
+  const textoNorm = normalizarNombrePersona(texto);
+  const exacta = lista.find((item) => normalizarNombrePersona(item[campoNombre]) === textoNorm);
+  if (exacta) return exacta[campoNombre];
+
+  let mejor = null;
+  let mejorPuntuacion = 0;
+  lista.forEach((item) => {
+    const tokensItem = new Set(tokensNombrePersona(item[campoNombre]));
+    if (tokensItem.size === 0) return;
+    const [menor, mayor] = tokensItem.size <= tokensTexto.size ? [tokensItem, tokensTexto] : [tokensTexto, tokensItem];
+    const interseccion = [...menor].filter((t) => mayor.has(t));
+    const esSubconjunto = interseccion.length === menor.size;
+    if (esSubconjunto && interseccion.length >= 2 && interseccion.length > mejorPuntuacion) {
+      mejor = item[campoNombre];
+      mejorPuntuacion = interseccion.length;
+    }
+  });
+  return mejor;
+}
+
 function parseAnyDate(val) {
   if (val == null || val === "") return null;
   if (val instanceof Date && !isNaN(val)) return val;
@@ -1162,11 +1212,19 @@ export default function AgendaVendedores() {
             if (!mesAnio && fecha) {
               mesAnio = `${fecha.getFullYear()}-${String(fecha.getMonth() + 1).padStart(2, "0")}`;
             }
+            const vendedorTexto = kVendedor ? String(r[kVendedor] || "").trim() : "";
+            const gestorTexto = kGestorLead ? String(r[kGestorLead] || "").trim() : "";
+            // Si el nombre del Excel coincide (aunque sea con formato distinto) con un vendedor
+            // o gestor ya creado en la app, se usa el nombre "canónico" tal como está en la app,
+            // para que el informe agrupe correctamente en vez de crear una categoría nueva por
+            // cada variante de formato del listado de origen.
+            const vendedorCanonico = vendedorTexto ? emparejarNombrePersona(vendedorTexto, vendedores, "nombre") : null;
+            const gestorCanonico = gestorTexto ? emparejarNombrePersona(gestorTexto, gestores, "nombre") : null;
             return {
               phone: normalizePhone(r[kPhone]),
               date: fecha,
-              vendedor: kVendedor ? String(r[kVendedor] || "").trim() : "",
-              gestorLead: kGestorLead ? String(r[kGestorLead] || "").trim() : "",
+              vendedor: vendedorCanonico || vendedorTexto,
+              gestorLead: gestorCanonico || gestorTexto,
               coche: kCoche ? String(r[kCoche] || "").trim() : "",
               modelo: kModelo ? String(r[kModelo] || "").trim() : "",
               isla: kIsla ? normalizarIsla(r[kIsla]) : "",

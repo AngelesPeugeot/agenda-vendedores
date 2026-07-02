@@ -351,6 +351,15 @@ function addDays(date, n) {
   return d;
 }
 
+// Deriva la fecha real (Date) de una cita a partir de su weekKey (lunes de esa semana, en
+// formato "YYYY-MM-DD") y su índice de día (0=Lunes...5=Sábado). Devuelve null si el weekKey
+// no es válido. Se usa tanto para el informe como para el reparto equitativo de citas.
+function fechaDeCitaSemana(weekKey, day) {
+  const monday = new Date(weekKey);
+  if (isNaN(monday)) return null;
+  return addDays(monday, day);
+}
+
 // =====================================================================
 // CAPA DE DATOS — Firebase Firestore (compartido, tiempo real)
 // Con fallback automático a localStorage-en-memoria si Firebase no está
@@ -1069,9 +1078,37 @@ export default function AgendaVendedores() {
     [vendedoresFiltrados, isWorking, estaDeVacaciones, weekDates]
   );
 
-  const citasDeVendorEnSemana = useCallback(
-    (vendorId) => citas.filter((c) => c.vendorId === vendorId && c.estado !== "cancelada").length,
-    [citas]
+  // Cuenta las citas activas de un vendedor dentro del mismo mes/año que `fechaRef`, usando
+  // TODAS las citas (de cualquier semana), no solo la que se esté viendo. Así, alguien que
+  // llevó varias semanas flojas dentro del mes sigue teniendo prioridad de reparto, en vez de
+  // que el contador se reinicie cada semana.
+  const citasDeVendorEnMes = useCallback(
+    (vendorId, fechaRef) => {
+      if (!fechaRef) return 0;
+      const anio = fechaRef.getFullYear();
+      const mes = fechaRef.getMonth();
+      return todasLasCitas.filter((c) => {
+        if (c.vendorId !== vendorId || c.estado === "cancelada") return false;
+        const fecha = fechaDeCitaSemana(c.weekKey, c.day);
+        return fecha && fecha.getFullYear() === anio && fecha.getMonth() === mes;
+      }).length;
+    },
+    [todasLasCitas]
+  );
+
+  // Fecha de la cita más reciente asignada a un vendedor (de cualquier semana), para desempatar
+  // entre vendedores con la misma carga: prioriza a quien lleva más tiempo sin recibir una cita.
+  const ultimaFechaCitaVendedor = useCallback(
+    (vendorId) => {
+      let ultima = null;
+      todasLasCitas.forEach((c) => {
+        if (c.vendorId !== vendorId || c.estado === "cancelada") return;
+        const fecha = fechaDeCitaSemana(c.weekKey, c.day);
+        if (fecha && (!ultima || fecha > ultima)) ultima = fecha;
+      });
+      return ultima;
+    },
+    [todasLasCitas]
   );
 
   const sugerirVendedor = useCallback(
@@ -1085,11 +1122,23 @@ export default function AgendaVendedores() {
       );
       const libres = disponibles.filter((v) => !ocupadosEnSlot.has(v.id));
       const pool = libres.length > 0 ? libres : disponibles;
-      return pool.reduce((min, v) =>
-        citasDeVendorEnSemana(v.id) < citasDeVendorEnSemana(min.id) ? v : min
-      , pool[0]);
+      const fechaRef = weekDates[dayIdx];
+      const conDatos = pool.map((v) => ({
+        v,
+        cargaMes: citasDeVendorEnMes(v.id, fechaRef),
+        ultima: ultimaFechaCitaVendedor(v.id),
+      }));
+      conDatos.sort((a, b) => {
+        if (a.cargaMes !== b.cargaMes) return a.cargaMes - b.cargaMes;
+        // Desempate: quien lleva más tiempo sin recibir una cita va primero. Si nunca ha
+        // tenido ninguna, tiene prioridad máxima.
+        const ta = a.ultima ? a.ultima.getTime() : -Infinity;
+        const tb = b.ultima ? b.ultima.getTime() : -Infinity;
+        return ta - tb;
+      });
+      return conDatos[0]?.v || null;
     },
-    [vendoresDisponibles, citas, citasDeVendorEnSemana]
+    [vendoresDisponibles, citas, weekDates, citasDeVendorEnMes, ultimaFechaCitaVendedor]
   );
 
   const handleSaveCita = useCallback(
@@ -1421,14 +1470,24 @@ export default function AgendaVendedores() {
   const hayFiltrosLeadsActivos =
     leadBusqueda || leadFiltroEstado !== "todos" || leadFiltroGestorId || leadFiltroIsla || leadFiltroMesAnio;
 
+  // Carga mensual por vendedor (no solo de la semana que se está viendo), para que la leyenda
+  // de la agenda refleje el mismo criterio de equidad que usa la sugerencia de vendedor al
+  // crear una cita. Se usa el mes de la semana actualmente visible como referencia.
   const cargaPorVendedor = useMemo(() => {
     const map = {};
     vendedores.forEach((v) => (map[v.id] = 0));
-    citasActivas.forEach((c) => {
-      map[c.vendorId] = (map[c.vendorId] || 0) + 1;
+    const fechaRef = weekDates[0];
+    const anio = fechaRef.getFullYear();
+    const mes = fechaRef.getMonth();
+    todasLasCitas.forEach((c) => {
+      if (c.estado === "cancelada") return;
+      const fecha = fechaDeCitaSemana(c.weekKey, c.day);
+      if (fecha && fecha.getFullYear() === anio && fecha.getMonth() === mes) {
+        map[c.vendorId] = (map[c.vendorId] || 0) + 1;
+      }
     });
     return map;
-  }, [vendedores, citasActivas]);
+  }, [vendedores, todasLasCitas, weekDates]);
   const maxCarga = Math.max(1, ...Object.values(cargaPorVendedor));
   const minCarga = vendedores.length ? Math.min(...Object.values(cargaPorVendedor)) : 0;
   const desbalanceado = vendedores.length > 1 && maxCarga - minCarga >= 2;
@@ -1501,13 +1560,7 @@ export default function AgendaVendedores() {
           : columnaEstadoExiste
             ? (matches.some((m) => m.vendido === true) ? true : matches.some((m) => m.vendido === false) ? false : null)
             : true;
-        let fecha = null;
-        try {
-          const monday = new Date(c.weekKey);
-          if (!isNaN(monday)) fecha = addDays(monday, c.day);
-        } catch {
-          fecha = null;
-        }
+        const fecha = fechaDeCitaSemana(c.weekKey, c.day);
         const mesAnio = fecha ? `${fecha.getFullYear()}-${String(fecha.getMonth() + 1).padStart(2, "0")}` : "";
         return {
           phone: normalizePhone(c.telefono),
@@ -2800,6 +2853,7 @@ export default function AgendaVendedores() {
             ))}
           </div>
 
+          <div style={styles.legendTitulo}>Carga de citas este mes (por vendedor)</div>
           <div style={styles.legend}>
             {vendedoresFiltrados.length === 0 ? (
               <div style={styles.panelHint}>Ningún vendedor coincide con el filtro de isla/sede seleccionado.</div>
@@ -2838,6 +2892,8 @@ export default function AgendaVendedores() {
           gestores={gestores}
           vendoresDisponibles={vendoresDisponibles}
           sugerirVendedor={sugerirVendedor}
+          citasDeVendorEnMes={citasDeVendorEnMes}
+          weekDates={weekDates}
           dias={DIAS}
           ventasParaTelefono={ventasParaTelefono}
           esVendida={esVendida}
@@ -3136,7 +3192,7 @@ function VendedorRow({ vendedor, citasCount, onRemove, onUpdateUbicacion }) {
         <div style={styles.vendorName}>{vendedor.nombre}</div>
         {!editando && (
           <div style={styles.vendorMeta}>
-            {citasCount} citas esta semana
+            {citasCount} citas este mes
             {vendedor.isla && ` · ${vendedor.sede}, ${vendedor.isla}`}
           </div>
         )}
@@ -3180,7 +3236,7 @@ function VendedorRow({ vendedor, citasCount, onRemove, onUpdateUbicacion }) {
 }
 
 // ---------- Modal de cita (crear / editar / cancelar / eliminar) ----------
-function CitaModal({ modalCita, vendedores, gestores, vendoresDisponibles, sugerirVendedor, dias, ventasParaTelefono, esVendida, onClose, onSave, onCancel, onDelete }) {
+function CitaModal({ modalCita, vendedores, gestores, vendoresDisponibles, sugerirVendedor, citasDeVendorEnMes, weekDates, dias, ventasParaTelefono, esVendida, onClose, onSave, onCancel, onDelete }) {
   const isEdit = !!modalCita.existing;
   const existing = modalCita.existing;
   const day = isEdit ? existing.day : modalCita.day;
@@ -3197,6 +3253,21 @@ function CitaModal({ modalCita, vendedores, gestores, vendoresDisponibles, suger
 
   const vendorActual = vendedores.find((v) => v.id === vendorId);
   const matches = telefono ? ventasParaTelefono(telefono) : [];
+
+  // Si se ha elegido un vendedor distinto al sugerido y ya tiene claramente más citas este mes
+  // que el sugerido (misma diferencia que dispara el aviso de "Carga desigual"), se muestra un
+  // aviso suave, no bloqueante: el gestor puede seguir adelante con un clic si tiene una razón
+  // legítima (p.ej. el cliente pide a esa persona en concreto).
+  const avisoSobrecarga = useMemo(() => {
+    if (isEdit || !sugerido || !vendorId || vendorId === sugerido.id) return null;
+    const fechaRef = weekDates[day];
+    const cargaElegido = citasDeVendorEnMes(vendorId, fechaRef);
+    const cargaSugerido = citasDeVendorEnMes(sugerido.id, fechaRef);
+    if (cargaElegido - cargaSugerido >= 2) {
+      return { cargaElegido, cargaSugerido };
+    }
+    return null;
+  }, [isEdit, sugerido, vendorId, day, weekDates, citasDeVendorEnMes]);
 
   // Para editar, ofrecemos también al vendedor actual aunque ya no tenga turno disponible,
   // para no "perder" la asignación si los turnos cambiaron después de crear la cita.
@@ -3232,7 +3303,7 @@ function CitaModal({ modalCita, vendedores, gestores, vendoresDisponibles, suger
         {sugerido && !isEdit && (
           <div style={styles.suggestBox}>
             <span style={{ ...styles.vendorDot, background: colorParaSede(sugerido.isla, sugerido.sede).border }} />
-            Sugerencia: <strong>{sugerido.nombre}</strong> es quien menos citas tiene esta semana.
+            Sugerencia: <strong>{sugerido.nombre}</strong> es quien menos citas tiene este mes.
           </div>
         )}
 
@@ -3259,6 +3330,12 @@ function CitaModal({ modalCita, vendedores, gestores, vendoresDisponibles, suger
                   </button>
                 );
               })}
+            </div>
+          )}
+          {avisoSobrecarga && (
+            <div style={styles.avisoSobrecargaBox}>
+              <AlertCircle size={13} />
+              {vendorActual?.nombre} ya tiene {avisoSobrecarga.cargaElegido} citas este mes, frente a {avisoSobrecarga.cargaSugerido} de {sugerido.nombre}. Puedes continuar igualmente si hay un motivo (p. ej. el cliente pide a esta persona).
             </div>
           )}
         </div>
@@ -3448,7 +3525,8 @@ const styles = {
   citaChipTextWrap: { display: "flex", flexDirection: "column", overflow: "hidden", flex: 1, minWidth: 0 },
   citaChipGestor: { fontSize: 9, fontWeight: 500, opacity: 0.75, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
 
-  legend: { marginTop: 20, display: "flex", flexDirection: "column", gap: 7, maxWidth: 500 },
+  legendTitulo: { marginTop: 20, fontSize: 12, fontWeight: 600, color: "#7A6B4C" },
+  legend: { marginTop: 8, display: "flex", flexDirection: "column", gap: 7, maxWidth: 500 },
   legendItem: { display: "flex", alignItems: "center", gap: 8 },
   legendName: { fontSize: 12, width: 100, flexShrink: 0, color: "#5C5240", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
   legendLocation: { fontSize: 11, color: "#A89B7E", width: 90, flexShrink: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
@@ -3498,6 +3576,7 @@ const styles = {
   modalSub: { fontSize: 12.5, color: "#8A7B5C", marginTop: 2 },
   cancelBanner: { display: "flex", alignItems: "center", gap: 7, fontSize: 12, background: "#FBF1DE", color: "#8A5E10", padding: "8px 10px", borderRadius: 8, marginBottom: 14, fontWeight: 600 },
   suggestBox: { display: "flex", alignItems: "center", gap: 7, fontSize: 12, background: "#EAF2EC", color: "#2F5E3F", padding: "8px 10px", borderRadius: 8, marginBottom: 14 },
+  avisoSobrecargaBox: { display: "flex", alignItems: "flex-start", gap: 7, fontSize: 11.5, background: "#FBF1DE", color: "#8A5E10", padding: "8px 10px", borderRadius: 8, marginTop: 8, lineHeight: 1.4 },
   modalField: { marginBottom: 14 },
   modalLabel: { display: "block", fontSize: 12, fontWeight: 600, color: "#7A6B4C", marginBottom: 6 },
   noVendorWarn: { fontSize: 12.5, color: "#A14B2C", background: "#FBEDE6", padding: "8px 10px", borderRadius: 8 },

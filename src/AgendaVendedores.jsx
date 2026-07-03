@@ -798,6 +798,24 @@ export default function AgendaVendedores() {
   const [leadFiltroGestorId, setLeadFiltroGestorId] = useState("");
   const [leadFiltroIsla, setLeadFiltroIsla] = useState("");
   const [leadFiltroMesAnio, setLeadFiltroMesAnio] = useState("");
+  const [leadAgruparPor, setLeadAgruparPor] = useState("mes");
+  const [gruposLeadToggled, setGruposLeadToggled] = useState(() => new Set());
+  const [formLeadAbierto, setFormLeadAbierto] = useState(false);
+
+  // Al cambiar el criterio de agrupación, se olvidan los plegados/desplegados manuales, para
+  // que el estado por defecto (primer grupo abierto, resto plegado) vuelva a aplicarse limpio.
+  useEffect(() => {
+    setGruposLeadToggled(new Set());
+  }, [leadAgruparPor]);
+
+  const toggleGrupoLead = useCallback((clave) => {
+    setGruposLeadToggled((prev) => {
+      const next = new Set(prev);
+      if (next.has(clave)) next.delete(clave);
+      else next.add(clave);
+      return next;
+    });
+  }, []);
 
   const showToast = useCallback((msg) => {
     setToast(msg);
@@ -1458,6 +1476,37 @@ export default function AgendaVendedores() {
       return true;
     });
   }, [leadsSinCita, leadBusqueda, leadFiltroGestorId, leadFiltroIsla, leadFiltroMesAnio, leadFiltroEstado, ventasParaTelefono, esVendida]);
+
+  // Agrupa los leads ya filtrados por mes o por gestor lead, para que la lista no se muestre
+  // como un bloque interminable. Cada grupo se puede plegar/desplegar; por defecto solo el
+  // primero (el mes más reciente, o el gestor con más leads) aparece desplegado.
+  const leadsAgrupados = useMemo(() => {
+    const map = new Map();
+    leadsSinCitaFiltrados.forEach((l) => {
+      let clave, etiqueta;
+      if (leadAgruparPor === "gestor") {
+        const g = gestores.find((gg) => gg.id === l.gestorId);
+        clave = l.gestorId || "sin-gestor";
+        etiqueta = g?.nombre || "Sin gestor";
+      } else {
+        clave = l.mesAnio || "sin-mes";
+        etiqueta = l.mesAnio ? mesAnioLabel(l.mesAnio) : "Sin mes";
+      }
+      if (!map.has(clave)) map.set(clave, { clave, etiqueta, leads: [] });
+      map.get(clave).leads.push(l);
+    });
+    const grupos = Array.from(map.values());
+    if (leadAgruparPor === "mes") {
+      grupos.sort((a, b) => {
+        if (a.clave === "sin-mes") return 1;
+        if (b.clave === "sin-mes") return -1;
+        return b.clave.localeCompare(a.clave);
+      });
+    } else {
+      grupos.sort((a, b) => b.leads.length - a.leads.length || a.etiqueta.localeCompare(b.etiqueta));
+    }
+    return grupos;
+  }, [leadsSinCitaFiltrados, leadAgruparPor, gestores]);
 
   const limpiarFiltrosLeads = useCallback(() => {
     setLeadBusqueda("");
@@ -2168,67 +2217,80 @@ export default function AgendaVendedores() {
             Presupuestos enviados o derivaciones directas a un vendedor (p.ej. empresas), sin pasar por la agenda. Cuentan igualmente en los KPIs de gestor lead y se cotejan por teléfono como una cita más.
           </div>
 
-          <div style={styles.leadFormGrid}>
-            <input
-              value={nuevoLeadCliente}
-              onChange={(e) => setNuevoLeadCliente(e.target.value)}
-              placeholder="Nombre del cliente"
-              style={styles.input}
-            />
-            <div style={styles.phoneInputWrap}>
-              <Phone size={14} color="#A89B7E" />
-              <input
-                value={nuevoLeadTelefono}
-                onChange={(e) => setNuevoLeadTelefono(e.target.value)}
-                placeholder="Teléfono"
-                style={styles.phoneInput}
-                inputMode="tel"
-              />
-            </div>
-            <select value={nuevoLeadGestorId} onChange={(e) => setNuevoLeadGestorId(e.target.value)} style={styles.select}>
-              <option value="">Gestor lead…</option>
-              {gestores.map((g) => (
-                <option key={g.id} value={g.id}>{g.nombre}</option>
-              ))}
-            </select>
-            <select value={nuevoLeadVendorId} onChange={(e) => setNuevoLeadVendorId(e.target.value)} style={styles.select}>
-              <option value="">Vendedor (opcional)…</option>
-              {vendedores.map((v) => (
-                <option key={v.id} value={v.id}>{v.nombre}</option>
-              ))}
-            </select>
-            <select
-              value={nuevoLeadIsla}
-              onChange={(e) => {
-                const isla = e.target.value;
-                setNuevoLeadIsla(isla);
-                setNuevoLeadSede((ISLAS_SEDES[isla] || [])[0] || "");
-              }}
-              style={styles.select}
-            >
-              <option value="">Isla (opcional)…</option>
-              {ISLAS.map((isla) => (
-                <option key={isla} value={isla}>{isla}</option>
-              ))}
-            </select>
-            {(ISLAS_SEDES[nuevoLeadIsla] || []).length > 0 && (
-              <select value={nuevoLeadSede} onChange={(e) => setNuevoLeadSede(e.target.value)} style={styles.select}>
-                {ISLAS_SEDES[nuevoLeadIsla].map((sede) => (
-                  <option key={sede} value={sede}>{sede}</option>
-                ))}
-              </select>
-            )}
-            <input
-              type="month"
-              value={nuevoLeadMesAnio}
-              onChange={(e) => setNuevoLeadMesAnio(e.target.value)}
-              style={styles.select}
-              title="Mes al que corresponde este lead"
-            />
-            <button onClick={handleAddLeadSinCita} style={styles.primaryBtn}>
-              <Plus size={16} /> Añadir
+          {!formLeadAbierto ? (
+            <button onClick={() => setFormLeadAbierto(true)} style={{ ...styles.primaryBtn, marginBottom: 18 }}>
+              <Plus size={16} /> Nuevo cliente
             </button>
-          </div>
+          ) : (
+            <div style={styles.leadFormWrap}>
+              <div style={styles.leadFormGrid}>
+                <input
+                  value={nuevoLeadCliente}
+                  onChange={(e) => setNuevoLeadCliente(e.target.value)}
+                  placeholder="Nombre del cliente"
+                  style={styles.input}
+                />
+                <div style={styles.phoneInputWrap}>
+                  <Phone size={14} color="#A89B7E" />
+                  <input
+                    value={nuevoLeadTelefono}
+                    onChange={(e) => setNuevoLeadTelefono(e.target.value)}
+                    placeholder="Teléfono"
+                    style={styles.phoneInput}
+                    inputMode="tel"
+                  />
+                </div>
+                <select value={nuevoLeadGestorId} onChange={(e) => setNuevoLeadGestorId(e.target.value)} style={styles.select}>
+                  <option value="">Gestor lead…</option>
+                  {gestores.map((g) => (
+                    <option key={g.id} value={g.id}>{g.nombre}</option>
+                  ))}
+                </select>
+                <select value={nuevoLeadVendorId} onChange={(e) => setNuevoLeadVendorId(e.target.value)} style={styles.select}>
+                  <option value="">Vendedor (opcional)…</option>
+                  {vendedores.map((v) => (
+                    <option key={v.id} value={v.id}>{v.nombre}</option>
+                  ))}
+                </select>
+                <select
+                  value={nuevoLeadIsla}
+                  onChange={(e) => {
+                    const isla = e.target.value;
+                    setNuevoLeadIsla(isla);
+                    setNuevoLeadSede((ISLAS_SEDES[isla] || [])[0] || "");
+                  }}
+                  style={styles.select}
+                >
+                  <option value="">Isla (opcional)…</option>
+                  {ISLAS.map((isla) => (
+                    <option key={isla} value={isla}>{isla}</option>
+                  ))}
+                </select>
+                {(ISLAS_SEDES[nuevoLeadIsla] || []).length > 0 && (
+                  <select value={nuevoLeadSede} onChange={(e) => setNuevoLeadSede(e.target.value)} style={styles.select}>
+                    {ISLAS_SEDES[nuevoLeadIsla].map((sede) => (
+                      <option key={sede} value={sede}>{sede}</option>
+                    ))}
+                  </select>
+                )}
+                <input
+                  type="month"
+                  value={nuevoLeadMesAnio}
+                  onChange={(e) => setNuevoLeadMesAnio(e.target.value)}
+                  style={styles.select}
+                  title="Mes al que corresponde este lead"
+                />
+              </div>
+              <div style={styles.leadFormAcciones}>
+                <button onClick={() => setFormLeadAbierto(false)} style={styles.secondaryBtnSmall}>
+                  Cerrar
+                </button>
+                <button onClick={handleAddLeadSinCita} style={styles.primaryBtn}>
+                  <Plus size={16} /> Añadir
+                </button>
+              </div>
+            </div>
+          )}
 
           {leadsSinCita.length > 0 && (
             <div style={styles.leadFiltrosBar}>
@@ -2270,7 +2332,27 @@ export default function AgendaVendedores() {
             </div>
           )}
 
-          <div style={styles.vendorList}>
+          {leadsSinCita.length > 0 && (
+            <div style={styles.leadAgruparBar}>
+              <span style={styles.informeFiltroLabel}>Agrupar por</span>
+              <div style={styles.informeOrdenToggle}>
+                <button
+                  onClick={() => setLeadAgruparPor("mes")}
+                  style={leadAgruparPor === "mes" ? styles.informeOrdenBtnActive : styles.informeOrdenBtn}
+                >
+                  Mes
+                </button>
+                <button
+                  onClick={() => setLeadAgruparPor("gestor")}
+                  style={leadAgruparPor === "gestor" ? styles.informeOrdenBtnActive : styles.informeOrdenBtn}
+                >
+                  Gestor
+                </button>
+              </div>
+            </div>
+          )}
+
+          <div>
             {leadsSinCita.length === 0 ? (
               <div style={styles.panelHint}>Aún no hay clientes sin cita añadidos.</div>
             ) : leadsSinCitaFiltrados.length === 0 ? (
@@ -2278,40 +2360,57 @@ export default function AgendaVendedores() {
             ) : (
               <>
                 <div style={styles.panelHint}>{leadsSinCitaFiltrados.length} de {leadsSinCita.length} clientes</div>
-                {leadsSinCitaFiltrados.map((l) => {
-                  const v = vendedores.find((vv) => vv.id === l.vendorId);
-                  const g = gestores.find((gg) => gg.id === l.gestorId);
-                  const vendido = leadsSinCitaConVenta.has(l.id);
-                  const matches = ventasParaTelefono(l.telefono);
+                {leadsAgrupados.map((grupo, i) => {
+                  const defaultAbierto = i === 0;
+                  const abierto = gruposLeadToggled.has(grupo.clave) ? !defaultAbierto : defaultAbierto;
                   return (
-                    <div key={l.id} style={{ ...styles.cotejoRow, borderLeftColor: vendido ? "#4F9B72" : "#E5E0D4" }}>
-                      <div style={{ flex: 1, minWidth: 0 }}>
-                        <div style={styles.cotejoName}>
-                          {l.cliente || "Cliente sin nombre"} <span style={styles.cotejoPhone}>{l.telefono}</span>
-                        </div>
-                        <div style={styles.cotejoMeta}>
-                          {g?.nombre ? `Gestor: ${g.nombre}` : "Sin gestor"}
-                          {v?.nombre ? ` · ${v.nombre}` : " · Sin vendedor"}
-                          {l.isla ? ` · ${l.isla}` : ""}
-                          {l.sede ? ` (${l.sede})` : ""}
-                          {l.mesAnio ? ` · ${mesAnioLabel(l.mesAnio)}` : ""}
-                        </div>
-                      </div>
-                      {matches.length > 0 ? (
-                        vendido ? (
-                          <div style={styles.vendidaTag}>
-                            <Check size={12} /> Vendido
-                            {matches[0]?.modelo ? ` · ${matches[0].modelo}` : matches[0]?.coche ? ` · ${matches[0].coche}` : ""}
-                          </div>
-                        ) : (
-                          <div style={styles.pendienteTag}>No vendido</div>
-                        )
-                      ) : (
-                        <div style={styles.pendienteTag}>Sin venta registrada</div>
-                      )}
-                      <button onClick={() => handleRemoveLeadSinCita(l.id)} style={styles.iconBtn} aria-label={`Eliminar ${l.cliente}`}>
-                        <Trash2 size={15} />
+                    <div key={grupo.clave} style={styles.leadGrupoWrap}>
+                      <button onClick={() => toggleGrupoLead(grupo.clave)} style={styles.leadGrupoHeader}>
+                        <ChevronDown size={14} style={{ transform: abierto ? "none" : "rotate(-90deg)", flexShrink: 0, color: "#A89B7E" }} />
+                        <span style={styles.leadGrupoTitulo}>{grupo.etiqueta}</span>
+                        <span style={styles.leadGrupoCount}>{grupo.leads.length}</span>
                       </button>
+                      {abierto && (
+                        <div style={styles.vendorList}>
+                          {grupo.leads.map((l) => {
+                            const v = vendedores.find((vv) => vv.id === l.vendorId);
+                            const g = gestores.find((gg) => gg.id === l.gestorId);
+                            const vendido = leadsSinCitaConVenta.has(l.id);
+                            const matches = ventasParaTelefono(l.telefono);
+                            return (
+                              <div key={l.id} style={{ ...styles.cotejoRow, borderLeftColor: vendido ? "#4F9B72" : "#E5E0D4" }}>
+                                <div style={{ flex: 1, minWidth: 0 }}>
+                                  <div style={styles.cotejoName}>
+                                    {l.cliente || "Cliente sin nombre"} <span style={styles.cotejoPhone}>{l.telefono}</span>
+                                  </div>
+                                  <div style={styles.cotejoMeta}>
+                                    {g?.nombre ? `Gestor: ${g.nombre}` : "Sin gestor"}
+                                    {v?.nombre ? ` · ${v.nombre}` : " · Sin vendedor"}
+                                    {l.isla ? ` · ${l.isla}` : ""}
+                                    {l.sede ? ` (${l.sede})` : ""}
+                                    {leadAgruparPor === "gestor" && l.mesAnio ? ` · ${mesAnioLabel(l.mesAnio)}` : ""}
+                                  </div>
+                                </div>
+                                {matches.length > 0 ? (
+                                  vendido ? (
+                                    <div style={styles.vendidaTag}>
+                                      <Check size={12} /> Vendido
+                                      {matches[0]?.modelo ? ` · ${matches[0].modelo}` : matches[0]?.coche ? ` · ${matches[0].coche}` : ""}
+                                    </div>
+                                  ) : (
+                                    <div style={styles.pendienteTag}>No vendido</div>
+                                  )
+                                ) : (
+                                  <div style={styles.pendienteTag}>Sin venta registrada</div>
+                                )}
+                                <button onClick={() => handleRemoveLeadSinCita(l.id)} style={styles.iconBtn} aria-label={`Eliminar ${l.cliente}`}>
+                                  <Trash2 size={15} />
+                                </button>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
                     </div>
                   );
                 })}
@@ -3472,7 +3571,14 @@ const styles = {
   panelHint: { fontSize: 12.5, color: "#8A7B5C", marginBottom: 16 },
 
   addRow: { display: "flex", gap: 8, marginBottom: 18, maxWidth: 560, flexWrap: "wrap" },
-  leadFormGrid: { display: "flex", gap: 8, marginBottom: 18, flexWrap: "wrap", maxWidth: 760, alignItems: "center" },
+  leadFormWrap: { background: "#fff", border: "1px solid #EBE4D3", borderRadius: 10, padding: "14px 16px", marginBottom: 18, maxWidth: 780 },
+  leadFormGrid: { display: "flex", gap: 8, marginBottom: 0, flexWrap: "wrap", alignItems: "center" },
+  leadFormAcciones: { display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 12 },
+  leadAgruparBar: { display: "flex", alignItems: "center", gap: 8, marginBottom: 12 },
+  leadGrupoWrap: { marginBottom: 10 },
+  leadGrupoHeader: { display: "flex", alignItems: "center", gap: 8, width: "100%", border: "none", background: "#F1EAD9", padding: "9px 12px", borderRadius: 8, cursor: "pointer", marginBottom: 6 },
+  leadGrupoTitulo: { fontSize: 13, fontWeight: 600, color: "#5C5240", flex: 1, textAlign: "left" },
+  leadGrupoCount: { fontSize: 11.5, fontWeight: 600, color: "#8A7B5C", background: "#fff", padding: "2px 8px", borderRadius: 999 },
   leadFiltrosBar: { display: "flex", gap: 8, marginBottom: 16, flexWrap: "wrap", alignItems: "center", paddingTop: 14, borderTop: "1px solid #EFE9DA" },
   input: { flex: 1, border: "1px solid #E5E0D4", borderRadius: 9, padding: "9px 12px", fontSize: 13.5, background: "#fff", color: "#2B2620", minWidth: 140 },
   select: { border: "1px solid #E5E0D4", borderRadius: 9, padding: "9px 10px", fontSize: 13, background: "#fff", color: "#2B2620", minWidth: 120 },

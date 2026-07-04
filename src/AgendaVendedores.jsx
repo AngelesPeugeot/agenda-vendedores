@@ -121,6 +121,26 @@ const ISLAS_SEDES = {
 };
 const ISLAS = Object.keys(ISLAS_SEDES);
 
+// Marcas que se venden en el concesionario. Un vendedor puede vender varias marcas a la vez
+// (por eso vendedor.marcas es un array), pero cada cita/lead concreto es de UNA marca en
+// particular, ya que una visita o presupuesto es siempre sobre un modelo de una marca dada.
+const MARCAS = ["Peugeot", "DS", "Opel", "Fiat", "Jeep", "Alfa Romeo", "Abarth", "Orvecame ocasión", "Ebro", "Leapmotor"];
+const MARCA_COLORES = {
+  Peugeot: { bg: "#EDE7F3", border: "#7A5C9E", text: "#4A3A63" },
+  DS: { bg: "#E8E6EA", border: "#4A4550", text: "#2B2830" },
+  Opel: { bg: "#F7E7E3", border: "#B0473F", text: "#6B2C26" },
+  Fiat: { bg: "#E3EEF7", border: "#3D7EB0", text: "#1F4560" },
+  Jeep: { bg: "#EAF0E3", border: "#5E7A3D", text: "#374A24" },
+  "Alfa Romeo": { bg: "#FBE7E3", border: "#B03D2E", text: "#6B241A" },
+  Abarth: { bg: "#FCEFE0", border: "#C97F2E", text: "#734A1A" },
+  "Orvecame ocasión": { bg: "#EFEAE0", border: "#8A7550", text: "#4F4330" },
+  Ebro: { bg: "#E3F0EC", border: "#3D9184", text: "#20544D" },
+  Leapmotor: { bg: "#E9F0FA", border: "#4472B0", text: "#274267" },
+};
+function colorParaMarca(marca) {
+  return MARCA_COLORES[marca] || { bg: "#F1EAD9", border: "#8A7B5C", text: "#5C5240" };
+}
+
 // Vistas de gestión puntual (no son del día a día), agrupadas bajo el menú "Gestión"
 // para no competir visualmente con Agenda y Sin cita, que son las de uso diario.
 const VISTAS_GESTION = ["turnos", "vendedores", "gestores", "ventas", "informe"];
@@ -770,6 +790,7 @@ export default function AgendaVendedores() {
   const [nuevoVendedorNombre, setNuevoVendedorNombre] = useState("");
   const [nuevoVendedorIsla, setNuevoVendedorIsla] = useState(ISLAS[0]);
   const [nuevoVendedorSede, setNuevoVendedorSede] = useState((ISLAS_SEDES[ISLAS[0]] || [])[0] || "");
+  const [nuevoVendedorMarcas, setNuevoVendedorMarcas] = useState([]);
   const [nuevoGestorNombre, setNuevoGestorNombre] = useState("");
   const [nuevaVacacionVendorId, setNuevaVacacionVendorId] = useState("");
   const [nuevaVacacionDesde, setNuevaVacacionDesde] = useState("");
@@ -783,6 +804,7 @@ export default function AgendaVendedores() {
   const [nuevoLeadVendorId, setNuevoLeadVendorId] = useState("");
   const [nuevoLeadIsla, setNuevoLeadIsla] = useState("");
   const [nuevoLeadSede, setNuevoLeadSede] = useState("");
+  const [nuevoLeadMarca, setNuevoLeadMarca] = useState("");
   const [nuevoLeadMesAnio, setNuevoLeadMesAnio] = useState(mesAnioActual());
   const [toast, setToast] = useState(null);
   const [subiendoHistorico, setSubiendoHistorico] = useState(false);
@@ -793,6 +815,7 @@ export default function AgendaVendedores() {
   const fileInputCotejoRef = useRef(null);
   const [filtroIslas, setFiltroIslas] = useState([]);
   const [filtroSedes, setFiltroSedes] = useState([]);
+  const [filtroMarcas, setFiltroMarcas] = useState([]);
   const [leadBusqueda, setLeadBusqueda] = useState("");
   const [leadFiltroEstado, setLeadFiltroEstado] = useState("todos");
   const [leadFiltroGestorId, setLeadFiltroGestorId] = useState("");
@@ -827,11 +850,12 @@ export default function AgendaVendedores() {
     const nombre = nuevoVendedorNombre.trim();
     if (!nombre) return;
     const sede = nuevoVendedorSede || nuevoVendedorIsla;
-    const nuevo = { id: genId(), nombre, isla: nuevoVendedorIsla, sede };
+    const nuevo = { id: genId(), nombre, isla: nuevoVendedorIsla, sede, marcas: nuevoVendedorMarcas };
     await addVendedor(nuevo);
     setNuevoVendedorNombre("");
+    setNuevoVendedorMarcas([]);
     showToast(`${nombre} añadido`);
-  }, [nuevoVendedorNombre, nuevoVendedorIsla, nuevoVendedorSede, addVendedor, showToast]);
+  }, [nuevoVendedorNombre, nuevoVendedorIsla, nuevoVendedorSede, nuevoVendedorMarcas, addVendedor, showToast]);
 
   const handleRemoveVendedor = useCallback(
     async (id) => {
@@ -995,9 +1019,10 @@ export default function AgendaVendedores() {
     return vendedores.filter((v) => {
       const okIsla = filtroIslas.length === 0 || filtroIslas.includes(v.isla);
       const okSede = filtroSedes.length === 0 || filtroSedes.includes(v.sede);
-      return okIsla && okSede;
+      const okMarca = filtroMarcas.length === 0 || (v.marcas || []).some((m) => filtroMarcas.includes(m));
+      return okIsla && okSede && okMarca;
     });
-  }, [vendedores, filtroIslas, filtroSedes]);
+  }, [vendedores, filtroIslas, filtroSedes, filtroMarcas]);
 
   const toggleFiltroIsla = useCallback((isla) => {
     setFiltroIslas((prev) => {
@@ -1013,9 +1038,14 @@ export default function AgendaVendedores() {
     setFiltroSedes((prev) => (prev.includes(sede) ? prev.filter((s) => s !== sede) : [...prev, sede]));
   }, []);
 
+  const toggleFiltroMarca = useCallback((marca) => {
+    setFiltroMarcas((prev) => (prev.includes(marca) ? prev.filter((m) => m !== marca) : [...prev, marca]));
+  }, []);
+
   const limpiarFiltros = useCallback(() => {
     setFiltroIslas([]);
     setFiltroSedes([]);
+    setFiltroMarcas([]);
   }, []);
 
   const sedesFiltrablesDisponibles = useMemo(() => {
@@ -1160,9 +1190,9 @@ export default function AgendaVendedores() {
   );
 
   const handleSaveCita = useCallback(
-    async (vendorId, dayIdx, hour, cliente, telefono, idExistente, gestorId) => {
+    async (vendorId, dayIdx, hour, cliente, telefono, idExistente, gestorId, marca) => {
       if (idExistente) {
-        await updateCita(idExistente, { vendorId, day: dayIdx, hour, cliente: cliente || "", telefono: telefono || "", gestorId: gestorId || "" });
+        await updateCita(idExistente, { vendorId, day: dayIdx, hour, cliente: cliente || "", telefono: telefono || "", gestorId: gestorId || "", marca: marca || "" });
         showToast("Cita actualizada");
       } else {
         await addCita({
@@ -1173,6 +1203,7 @@ export default function AgendaVendedores() {
           cliente: cliente || "",
           telefono: telefono || "",
           gestorId: gestorId || "",
+          marca: marca || "",
           estado: "activa",
         });
         showToast("Cita asignada");
@@ -1251,6 +1282,7 @@ export default function AgendaVendedores() {
           const kVendido = findKey("vendido", "venta", "sold", "estado", "cierre");
           const kAnio = findKey("ao", "anyo", "year");
           const kMes = findKey("mes", "month");
+          const kMarca = findKey("marca", "brand");
 
           if (!kPhone) {
             setError("No he encontrado una columna de teléfono en el archivo.");
@@ -1298,6 +1330,8 @@ export default function AgendaVendedores() {
             // cada variante de formato del listado de origen.
             const vendedorCanonico = vendedorTexto ? emparejarNombrePersona(vendedorTexto, vendedores, "nombre") : null;
             const gestorCanonico = gestorTexto ? emparejarNombrePersona(gestorTexto, gestores, "nombre") : null;
+            const marcaTexto = kMarca ? String(r[kMarca] || "").trim() : "";
+            const marcaCanonica = MARCAS.find((m) => normalizarNombrePersona(m) === normalizarNombrePersona(marcaTexto));
             return {
               phone: normalizePhone(r[kPhone]),
               date: fecha,
@@ -1309,6 +1343,7 @@ export default function AgendaVendedores() {
               sede: kSede ? String(r[kSede] || "").trim() : "",
               cliente: kCliente ? String(r[kCliente] || "").trim() : "",
               vendido: kVendido ? esVendidoTexto(r[kVendido]) : null,
+              marca: marcaCanonica || marcaTexto,
               mesAnio,
             };
           });
@@ -1337,6 +1372,7 @@ export default function AgendaVendedores() {
                   vendorId: vendedorMatch?.id || "",
                   isla: r.isla || "",
                   sede: r.sede || "",
+                  marca: r.marca || "",
                   mesAnio: r.mesAnio || "",
                   creadoEn: new Date().toISOString(),
                   origen: "excel",
@@ -1597,6 +1633,7 @@ export default function AgendaVendedores() {
         modelo: matches[0]?.modelo || matches[0]?.coche || "",
         isla: l.isla || matches[0]?.isla || "",
         sede: l.sede || matches[0]?.sede || "",
+        marca: l.marca || matches[0]?.marca || "",
         cliente: l.cliente || matches[0]?.cliente || "",
         vendido,
       };
@@ -1632,6 +1669,7 @@ export default function AgendaVendedores() {
           modelo: matches[0]?.modelo || matches[0]?.coche || "",
           isla: v?.isla || matches[0]?.isla || "",
           sede: v?.sede || matches[0]?.sede || "",
+          marca: c.marca || matches[0]?.marca || "",
           cliente: c.cliente || matches[0]?.cliente || "",
           vendido,
         };
@@ -1688,6 +1726,7 @@ export default function AgendaVendedores() {
       vendorId: nuevoLeadVendorId || "",
       isla: nuevoLeadIsla || "",
       sede: nuevoLeadSede || "",
+      marca: nuevoLeadMarca || "",
       mesAnio: nuevoLeadMesAnio || "",
       creadoEn: new Date().toISOString(),
       origen: "manual",
@@ -1699,10 +1738,11 @@ export default function AgendaVendedores() {
     setNuevoLeadVendorId("");
     setNuevoLeadIsla("");
     setNuevoLeadSede("");
+    setNuevoLeadMarca("");
     // El mes/año NO se resetea: si está añadiendo varios leads del mismo mes seguidos,
     // no tiene que volver a seleccionarlo cada vez.
     showToast(`${cliente || "Lead"} añadido`);
-  }, [nuevoLeadCliente, nuevoLeadTelefono, nuevoLeadGestorId, nuevoLeadVendorId, nuevoLeadIsla, nuevoLeadSede, nuevoLeadMesAnio, addLeadSinCita, showToast, registrosUnicosCombinados]);
+  }, [nuevoLeadCliente, nuevoLeadTelefono, nuevoLeadGestorId, nuevoLeadVendorId, nuevoLeadIsla, nuevoLeadSede, nuevoLeadMarca, nuevoLeadMesAnio, addLeadSinCita, showToast, registrosUnicosCombinados]);
 
   // Si el conjunto combinado trae la columna de estado (CIERRE/vendido) con al menos un valor
   // explícito, asumimos que esa columna existe de verdad: una fila vacía entonces significa
@@ -1847,6 +1887,7 @@ export default function AgendaVendedores() {
     const porGestorLead = agrupar("gestorLead");
     const porIsla = agrupar("isla");
     const porModelo = agrupar("modelo");
+    const porMarca = agrupar("marca");
 
     // Calidad de los datos: cuántos registros no tienen gestor o vendedor asignado,
     // para detectar huecos de información de un vistazo.
@@ -1899,6 +1940,7 @@ export default function AgendaVendedores() {
       porGestorLead,
       porIsla,
       porModelo,
+      porMarca,
       porMes,
       islasPresentes,
       fechaMin,
@@ -1980,6 +2022,7 @@ export default function AgendaVendedores() {
     XLSX.utils.book_append_sheet(wb, aHoja(resumenVentas.porGestorLead), "Por gestor lead");
     XLSX.utils.book_append_sheet(wb, aHoja(resumenVentas.porIsla), "Por isla");
     XLSX.utils.book_append_sheet(wb, aHoja(resumenVentas.porModelo), "Por modelo");
+    XLSX.utils.book_append_sheet(wb, aHoja(resumenVentas.porMarca), "Por marca");
 
     const hojaMes = XLSX.utils.aoa_to_sheet([
       ["Mes", "Total", "Vendidos"],
@@ -1988,7 +2031,7 @@ export default function AgendaVendedores() {
     XLSX.utils.book_append_sheet(wb, hojaMes, "Por mes");
 
     const hojaDetalle = XLSX.utils.aoa_to_sheet([
-      ["Cliente", "Teléfono", "Mes", "Vendedor", "Gestor lead", "Isla", "Sede", "Modelo", "Estado"],
+      ["Cliente", "Teléfono", "Mes", "Vendedor", "Gestor lead", "Isla", "Sede", "Marca", "Modelo", "Estado"],
       ...registrosFiltradosInforme.map((r) => [
         r.cliente || "",
         r.phone || "",
@@ -1997,6 +2040,7 @@ export default function AgendaVendedores() {
         r.gestorLead || "",
         r.isla || "",
         r.sede || "",
+        r.marca || "",
         r.modelo || r.coche || "",
         r.vendido === true ? "Vendido" : r.vendido === false ? "No vendido" : "Sin decidir",
       ]),
@@ -2128,7 +2172,14 @@ export default function AgendaVendedores() {
                 return colorParaSede(islaDeSede, sede).border;
               }}
             />
-            {(filtroIslas.length > 0 || filtroSedes.length > 0) && (
+            <FiltroDesplegable
+              etiqueta="Marca"
+              opciones={MARCAS.filter((marca) => vendedores.some((v) => (v.marcas || []).includes(marca)))}
+              seleccionados={filtroMarcas}
+              onToggle={toggleFiltroMarca}
+              colorDe={(marca) => colorParaMarca(marca).border}
+            />
+            {(filtroIslas.length > 0 || filtroSedes.length > 0 || filtroMarcas.length > 0) && (
               <button onClick={limpiarFiltros} style={styles.filterClear}>
                 <X size={11} /> Limpiar
               </button>
@@ -2183,6 +2234,23 @@ export default function AgendaVendedores() {
                 ))}
               </select>
             )}
+            <div style={styles.marcasCheckboxRow}>
+              {MARCAS.map((marca) => (
+                <label key={marca} style={styles.marcaCheckboxLabel}>
+                  <input
+                    type="checkbox"
+                    checked={nuevoVendedorMarcas.includes(marca)}
+                    onChange={() =>
+                      setNuevoVendedorMarcas((prev) =>
+                        prev.includes(marca) ? prev.filter((m) => m !== marca) : [...prev, marca]
+                      )
+                    }
+                    style={styles.filtroDesplegableCheckbox}
+                  />
+                  {marca}
+                </label>
+              ))}
+            </div>
             <button onClick={handleAddVendedor} style={styles.primaryBtn}>
               <Plus size={16} /> Añadir
             </button>
@@ -2195,6 +2263,7 @@ export default function AgendaVendedores() {
                 citasCount={cargaPorVendedor[v.id] || 0}
                 onRemove={() => handleRemoveVendedor(v.id)}
                 onUpdateUbicacion={(isla, sede) => updateVendedor(v.id, { isla, sede })}
+                onUpdateMarcas={(marcas) => updateVendedor(v.id, { marcas })}
               />
             ))}
           </div>
@@ -2303,6 +2372,12 @@ export default function AgendaVendedores() {
                     ))}
                   </select>
                 )}
+                <select value={nuevoLeadMarca} onChange={(e) => setNuevoLeadMarca(e.target.value)} style={styles.select}>
+                  <option value="">Marca (opcional)…</option>
+                  {MARCAS.map((marca) => (
+                    <option key={marca} value={marca}>{marca}</option>
+                  ))}
+                </select>
                 <input
                   type="month"
                   value={nuevoLeadMesAnio}
@@ -2418,6 +2493,7 @@ export default function AgendaVendedores() {
                                     {v?.nombre ? ` · ${v.nombre}` : " · Sin vendedor"}
                                     {l.isla ? ` · ${l.isla}` : ""}
                                     {l.sede ? ` (${l.sede})` : ""}
+                                    {l.marca ? ` · ${l.marca}` : ""}
                                     {leadAgruparPor === "gestor" && l.mesAnio ? ` · ${mesAnioLabel(l.mesAnio)}` : ""}
                                   </div>
                                 </div>
@@ -2962,6 +3038,7 @@ export default function AgendaVendedores() {
                   <InformeTabla titulo="Por gestor lead" filas={resumenVentas.porGestorLead} usarGrafico />
                   <InformeTabla titulo="Por isla" filas={resumenVentas.porIsla} />
                   <InformeTabla titulo="Por modelo" filas={resumenVentas.porModelo} />
+                  <InformeTabla titulo="Por marca" filas={resumenVentas.porMarca} />
                 </>
               )}
             </>
@@ -3007,9 +3084,10 @@ export default function AgendaVendedores() {
                               color: colorV.text,
                               opacity: fueraDeFiltro ? 0.4 : noAsistio ? 0.6 : 1,
                             }}
-                            title={`${v.nombre}${c.cliente ? " · " + c.cliente : ""}${c.telefono ? " · " + c.telefono : ""}${g ? " · Gestor: " + g.nombre : ""}${noAsistio ? " · No asistió" : c.asistio === true ? " · Asistió" : ""}`}
+                            title={`${v.nombre}${c.cliente ? " · " + c.cliente : ""}${c.telefono ? " · " + c.telefono : ""}${g ? " · Gestor: " + g.nombre : ""}${c.marca ? " · " + c.marca : ""}${noAsistio ? " · No asistió" : c.asistio === true ? " · Asistió" : ""}`}
                           >
                             <span style={{ ...styles.citaDot, background: colorV.border }} />
+                            {c.marca && <span style={{ ...styles.citaDot, background: colorParaMarca(c.marca).border }} />}
                             <span style={styles.citaChipTextWrap}>
                               <span style={styles.citaChipText}>{v.nombre.split(" ")[0]}{c.cliente ? ` · ${c.cliente}` : ""}</span>
                               {g && <span style={styles.citaChipGestor}>Gestor: {g.nombre}</span>}
@@ -3408,14 +3486,16 @@ function VendedorTurnoTexto({ vendedor, turnos, onAplicar, showToast }) {
 }
 
 // ---------- Fila de vendedor (con edición de isla/sede) ----------
-function VendedorRow({ vendedor, citasCount, onRemove, onUpdateUbicacion }) {
+function VendedorRow({ vendedor, citasCount, onRemove, onUpdateUbicacion, onUpdateMarcas }) {
   const [editando, setEditando] = useState(false);
   const [isla, setIsla] = useState(vendedor.isla || ISLAS[0]);
   const [sede, setSede] = useState(vendedor.sede || (ISLAS_SEDES[vendedor.isla] || [])[0] || vendedor.isla);
+  const [marcasEditadas, setMarcasEditadas] = useState(vendedor.marcas || []);
   const c = colorParaSede(vendedor.isla, vendedor.sede);
 
   const guardar = () => {
     onUpdateUbicacion(isla, sede);
+    onUpdateMarcas(marcasEditadas);
     setEditando(false);
   };
 
@@ -3428,6 +3508,18 @@ function VendedorRow({ vendedor, citasCount, onRemove, onUpdateUbicacion }) {
           <div style={styles.vendorMeta}>
             {citasCount} citas este mes
             {vendedor.isla && ` · ${vendedor.sede}, ${vendedor.isla}`}
+          </div>
+        )}
+        {!editando && (vendedor.marcas || []).length > 0 && (
+          <div style={styles.vendorMarcasRow}>
+            {vendedor.marcas.map((marca) => {
+              const mc = colorParaMarca(marca);
+              return (
+                <span key={marca} style={{ ...styles.vendorMarcaTag, background: mc.bg, color: mc.text, borderColor: mc.border }}>
+                  {marca}
+                </span>
+              );
+            })}
           </div>
         )}
       </div>
@@ -3453,13 +3545,30 @@ function VendedorRow({ vendedor, citasCount, onRemove, onUpdateUbicacion }) {
               ))}
             </select>
           )}
+          <div style={styles.marcasCheckboxRow}>
+            {MARCAS.map((marca) => (
+              <label key={marca} style={styles.marcaCheckboxLabel}>
+                <input
+                  type="checkbox"
+                  checked={marcasEditadas.includes(marca)}
+                  onChange={() =>
+                    setMarcasEditadas((prev) =>
+                      prev.includes(marca) ? prev.filter((m) => m !== marca) : [...prev, marca]
+                    )
+                  }
+                  style={styles.filtroDesplegableCheckbox}
+                />
+                {marca}
+              </label>
+            ))}
+          </div>
           <button onClick={guardar} style={styles.iconBtnConfirm} aria-label="Guardar ubicación">
             <Check size={14} />
           </button>
         </div>
       ) : (
         <button onClick={() => setEditando(true)} style={styles.secondaryBtnSmall}>
-          <Pencil size={12} /> Editar sede
+          <Pencil size={12} /> Editar
         </button>
       )}
       <button onClick={onRemove} style={styles.iconBtn} aria-label={`Eliminar ${vendedor.nombre}`}>
@@ -3484,9 +3593,30 @@ function CitaModal({ modalCita, vendedores, gestores, vendoresDisponibles, suger
   const [gestorId, setGestorId] = useState(isEdit ? existing.gestorId || "" : "");
   const [cliente, setCliente] = useState(isEdit ? existing.cliente : "");
   const [telefono, setTelefono] = useState(isEdit ? existing.telefono || "" : "");
+  const [marca, setMarca] = useState(isEdit ? existing.marca || "" : "");
 
   const vendorActual = vendedores.find((v) => v.id === vendorId);
   const matches = telefono ? ventasParaTelefono(telefono) : [];
+
+  // Las marcas que se pueden elegir dependen del vendedor: solo tiene sentido asignar una
+  // cita de una marca que ese vendedor realmente vende. Si el vendedor solo vende una marca,
+  // se autocompleta sola. Solo se "corrige" o limpia la marca cuando el usuario CAMBIA de
+  // vendedor a mano (no en el primer render), para no borrar por error una marca ya guardada
+  // en citas antiguas de vendedores que aún no tienen sus marcas configuradas.
+  const marcasDelVendedor = vendorActual?.marcas || [];
+  const esPrimerRenderRef = useRef(true);
+  useEffect(() => {
+    if (esPrimerRenderRef.current) {
+      esPrimerRenderRef.current = false;
+      if (!marca && marcasDelVendedor.length === 1) setMarca(marcasDelVendedor[0]);
+      return;
+    }
+    if (marcasDelVendedor.length === 1) {
+      setMarca(marcasDelVendedor[0]);
+    } else if (marca && !marcasDelVendedor.includes(marca)) {
+      setMarca("");
+    }
+  }, [vendorId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Si se ha elegido un vendedor distinto al sugerido y ya tiene claramente más citas este mes
   // que el sugerido (misma diferencia que dispara el aviso de "Carga desigual"), se muestra un
@@ -3595,6 +3725,35 @@ function CitaModal({ modalCita, vendedores, gestores, vendoresDisponibles, suger
         </div>
 
         <div style={styles.modalField}>
+          <label style={styles.modalLabel}>Marca</label>
+          {!vendorActual ? (
+            <div style={styles.panelHint}>Elige primero un vendedor.</div>
+          ) : marcasDelVendedor.length === 0 ? (
+            <div style={styles.noVendorWarn}>{vendorActual.nombre} no tiene marcas configuradas. Puedes añadirlas en la pestaña "Vendedores".</div>
+          ) : (
+            <div style={styles.vendorPicker}>
+              {marcasDelVendedor.map((m) => {
+                const mc = colorParaMarca(m);
+                return (
+                  <button
+                    key={m}
+                    onClick={() => setMarca(m)}
+                    style={{
+                      ...styles.vendorOption,
+                      background: marca === m ? mc.bg : "#fff",
+                      borderColor: marca === m ? mc.border : "#E5E0D4",
+                    }}
+                  >
+                    <span style={{ ...styles.vendorDot, background: mc.border }} />
+                    {m}
+                  </button>
+                );
+              })}
+            </div>
+          )}
+        </div>
+
+        <div style={styles.modalField}>
           <label style={styles.modalLabel}>Gestor lead (quién generó la cita)</label>
           {gestores.length === 0 ? (
             <div style={styles.panelHint}>Aún no hay gestores lead creados. Puedes añadirlos en la pestaña "Gestores".</div>
@@ -3655,7 +3814,7 @@ function CitaModal({ modalCita, vendedores, gestores, vendoresDisponibles, suger
           <button onClick={onClose} style={styles.secondaryBtn}>Cerrar</button>
           <button
             disabled={!vendorActual}
-            onClick={() => onSave(vendorId, day, hour, cliente, telefono, isEdit ? existing.id : null, gestorId)}
+            onClick={() => onSave(vendorId, day, hour, cliente, telefono, isEdit ? existing.id : null, gestorId, marca)}
             style={{ ...styles.primaryBtn, opacity: vendorActual ? 1 : 0.5 }}
           >
             <Check size={15} /> {isEdit ? (cancelada ? "Reactivar y guardar" : "Guardar cambios") : "Asignar cita"}
@@ -3729,6 +3888,8 @@ const styles = {
   panelHint: { fontSize: 12.5, color: "#8A7B5C", marginBottom: 16 },
 
   addRow: { display: "flex", gap: 8, marginBottom: 18, maxWidth: 560, flexWrap: "wrap" },
+  marcasCheckboxRow: { display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", border: "1px solid #E5E0D4", borderRadius: 9, padding: "8px 12px", background: "#fff", maxWidth: 480 },
+  marcaCheckboxLabel: { display: "flex", alignItems: "center", gap: 5, fontSize: 12.5, color: "#5C5240", cursor: "pointer", whiteSpace: "nowrap" },
   leadFormWrap: { background: "#fff", border: "1px solid #EBE4D3", borderRadius: 10, padding: "14px 16px", marginBottom: 18, maxWidth: 780 },
   leadFormGrid: { display: "flex", gap: 8, marginBottom: 0, flexWrap: "wrap", alignItems: "center" },
   leadFormAcciones: { display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 12 },
@@ -3754,6 +3915,8 @@ const styles = {
   vendorDot: { width: 9, height: 9, borderRadius: "50%", flexShrink: 0 },
   vendorName: { fontSize: 14, fontWeight: 600 },
   vendorMeta: { fontSize: 12, color: "#8A7B5C", marginTop: 1 },
+  vendorMarcasRow: { display: "flex", gap: 5, marginTop: 5, flexWrap: "wrap" },
+  vendorMarcaTag: { fontSize: 10.5, fontWeight: 600, border: "1px solid", borderRadius: 999, padding: "1px 8px" },
 
   turnoBlock: { marginBottom: 26 },
   turnoTextoBlock: { marginBottom: 22, background: "#fff", border: "1px solid #EBE4D3", borderRadius: 10, padding: "14px 16px", maxWidth: 620 },

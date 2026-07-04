@@ -1797,6 +1797,7 @@ export default function AgendaVendedores() {
   // Meses/años disponibles en todo el conjunto, para rellenar el filtro de mes del informe.
   const mesesDisponiblesInforme = useMemo(() => {
     const set = new Set(registrosUnicosCombinados.map((r) => r.mesAnio).filter(Boolean));
+    set.add(mesAnioActual()); // siempre visible en el desplegable, aunque aún no tenga datos
     return Array.from(set).sort().reverse();
   }, [registrosUnicosCombinados]);
 
@@ -1812,20 +1813,26 @@ export default function AgendaVendedores() {
   }, [registrosUnicosCombinados]);
 
   // ---------- Filtros del informe ----------
-  const [informeFiltroMesAnio, setInformeFiltroMesAnio] = useState("");
+  // Por defecto se muestra el mes en curso (dato más útil de un vistazo), pero se puede
+  // cambiar a cualquier otro periodo o quitar el filtro de mes en cualquier momento.
+  const [informeFiltroMesAnio, setInformeFiltroMesAnio] = useState(() => mesAnioActual());
   const [informeFiltroDesde, setInformeFiltroDesde] = useState("");
   const [informeFiltroHasta, setInformeFiltroHasta] = useState("");
+  const [informeFiltroMarca, setInformeFiltroMarca] = useState("");
   const [informeFiltroGestor, setInformeFiltroGestor] = useState("");
   const [informeFiltroVendedor, setInformeFiltroVendedor] = useState("");
   const [vistaGraficoMensual, setVistaGraficoMensual] = useState("total");
 
   const hayFiltrosInformeActivos =
-    informeFiltroMesAnio || informeFiltroDesde || informeFiltroHasta || informeFiltroGestor || informeFiltroVendedor;
+    informeFiltroMesAnio || informeFiltroDesde || informeFiltroHasta || informeFiltroMarca || informeFiltroGestor || informeFiltroVendedor;
 
+  // "Limpiar" quita todos los filtros, incluido el mes por defecto, para ver el histórico
+  // completo sin restricciones.
   const limpiarFiltrosInforme = useCallback(() => {
     setInformeFiltroMesAnio("");
     setInformeFiltroDesde("");
     setInformeFiltroHasta("");
+    setInformeFiltroMarca("");
     setInformeFiltroGestor("");
     setInformeFiltroVendedor("");
   }, []);
@@ -1839,11 +1846,12 @@ export default function AgendaVendedores() {
         hasta.setHours(23, 59, 59, 999);
         if (!r.date || r.date > hasta) return false;
       }
+      if (informeFiltroMarca && r.marca !== informeFiltroMarca) return false;
       if (informeFiltroGestor && r.gestorLead !== informeFiltroGestor) return false;
       if (informeFiltroVendedor && r.vendedor !== informeFiltroVendedor) return false;
       return true;
     });
-  }, [registrosUnicosCombinados, informeFiltroMesAnio, informeFiltroDesde, informeFiltroHasta, informeFiltroGestor, informeFiltroVendedor]);
+  }, [registrosUnicosCombinados, informeFiltroMesAnio, informeFiltroDesde, informeFiltroHasta, informeFiltroMarca, informeFiltroGestor, informeFiltroVendedor]);
 
   // ---------- Resumen del informe (sobre los registros ya filtrados) ----------
   const resumenVentas = useMemo(() => {
@@ -1970,6 +1978,7 @@ export default function AgendaVendedores() {
         hasta.setHours(23, 59, 59, 999);
         if (!fecha || fecha > hasta) return false;
       }
+      if (informeFiltroMarca && c.marca !== informeFiltroMarca) return false;
       if (informeFiltroGestor && gestorNombre !== informeFiltroGestor) return false;
       if (informeFiltroVendedor && vendedorNombre !== informeFiltroVendedor) return false;
       return true;
@@ -1994,7 +2003,7 @@ export default function AgendaVendedores() {
       .sort((a, b) => a.asistio / a.total - b.asistio / b.total || b.total - a.total);
 
     return { total: citasMarcadas.length, asistieron, noAsistieron, tasa, porVendedor };
-  }, [todasLasCitas, vendedores, gestores, informeFiltroMesAnio, informeFiltroDesde, informeFiltroHasta, informeFiltroGestor, informeFiltroVendedor]);
+  }, [todasLasCitas, vendedores, gestores, informeFiltroMesAnio, informeFiltroDesde, informeFiltroHasta, informeFiltroMarca, informeFiltroGestor, informeFiltroVendedor]);
 
   // Exporta el informe (ya filtrado) a un Excel con varias hojas: resumen, desgloses y detalle.
   const handleExportarInforme = useCallback(() => {
@@ -2765,42 +2774,53 @@ export default function AgendaVendedores() {
             </div>
           ) : (
             <>
+              <div style={styles.informeFiltrosPrincipales}>
+                <span style={styles.informeFiltroLabel}>Filtrar por</span>
+                <select value={informeFiltroMarca} onChange={(e) => setInformeFiltroMarca(e.target.value)} style={styles.selectDestacado}>
+                  <option value="">Todas las marcas</option>
+                  {MARCAS.map((m) => (
+                    <option key={m} value={m}>{m}</option>
+                  ))}
+                </select>
+                <select value={informeFiltroGestor} onChange={(e) => setInformeFiltroGestor(e.target.value)} style={styles.selectDestacado}>
+                  <option value="">Todos los gestores</option>
+                  {gestoresDisponiblesInforme.map((g) => (
+                    <option key={g} value={g}>{g}</option>
+                  ))}
+                </select>
+                <select value={informeFiltroVendedor} onChange={(e) => setInformeFiltroVendedor(e.target.value)} style={styles.selectDestacado}>
+                  <option value="">Todos los vendedores</option>
+                  {vendedoresDisponiblesInforme.map((v) => (
+                    <option key={v} value={v}>{v}</option>
+                  ))}
+                </select>
+              </div>
+
               <div style={styles.leadFiltrosBar}>
+                <span style={styles.informeFiltroLabel}>Periodo</span>
                 <select value={informeFiltroMesAnio} onChange={(e) => setInformeFiltroMesAnio(e.target.value)} style={styles.selectSmall}>
                   <option value="">Todos los meses</option>
                   {mesesDisponiblesInforme.map((m) => (
-                    <option key={m} value={m}>{mesAnioLabel(m)}</option>
+                    <option key={m} value={m}>{mesAnioLabel(m)}{m === mesAnioActual() ? " (actual)" : ""}</option>
                   ))}
                 </select>
-                <span style={styles.informeFiltroLabel}>Desde</span>
+                <span style={styles.informeFiltroLabel}>o rango: desde</span>
                 <input
                   type="date"
                   value={informeFiltroDesde}
                   onChange={(e) => setInformeFiltroDesde(e.target.value)}
                   style={styles.selectSmall}
                 />
-                <span style={styles.informeFiltroLabel}>Hasta</span>
+                <span style={styles.informeFiltroLabel}>hasta</span>
                 <input
                   type="date"
                   value={informeFiltroHasta}
                   onChange={(e) => setInformeFiltroHasta(e.target.value)}
                   style={styles.selectSmall}
                 />
-                <select value={informeFiltroGestor} onChange={(e) => setInformeFiltroGestor(e.target.value)} style={styles.selectSmall}>
-                  <option value="">Todos los gestores</option>
-                  {gestoresDisponiblesInforme.map((g) => (
-                    <option key={g} value={g}>{g}</option>
-                  ))}
-                </select>
-                <select value={informeFiltroVendedor} onChange={(e) => setInformeFiltroVendedor(e.target.value)} style={styles.selectSmall}>
-                  <option value="">Todos los vendedores</option>
-                  {vendedoresDisponiblesInforme.map((v) => (
-                    <option key={v} value={v}>{v}</option>
-                  ))}
-                </select>
                 {hayFiltrosInformeActivos && (
                   <button onClick={limpiarFiltrosInforme} style={styles.filterClear}>
-                    <X size={11} /> Limpiar
+                    <X size={11} /> Limpiar todo
                   </button>
                 )}
               </div>
@@ -3899,6 +3919,8 @@ const styles = {
   leadGrupoTitulo: { fontSize: 13, fontWeight: 600, color: "#5C5240", flex: 1, textAlign: "left" },
   leadGrupoCount: { fontSize: 11.5, fontWeight: 600, color: "#8A7B5C", background: "#fff", padding: "2px 8px", borderRadius: 999 },
   leadFiltrosBar: { display: "flex", gap: 8, marginBottom: 16, flexWrap: "wrap", alignItems: "center", paddingTop: 14, borderTop: "1px solid #EFE9DA" },
+  informeFiltrosPrincipales: { display: "flex", gap: 8, marginBottom: 4, flexWrap: "wrap", alignItems: "center" },
+  selectDestacado: { border: "1.5px solid #C45A2E", background: "#fff", color: "#3D362A", borderRadius: 9, padding: "8px 12px", fontSize: 13, fontWeight: 600, minWidth: 150 },
   input: { flex: 1, border: "1px solid #E5E0D4", borderRadius: 9, padding: "9px 12px", fontSize: 13.5, background: "#fff", color: "#2B2620", minWidth: 140 },
   select: { border: "1px solid #E5E0D4", borderRadius: 9, padding: "9px 10px", fontSize: 13, background: "#fff", color: "#2B2620", minWidth: 120 },
   selectSmall: { border: "1px solid #E5E0D4", borderRadius: 7, padding: "5px 7px", fontSize: 12, background: "#fff", color: "#2B2620" },

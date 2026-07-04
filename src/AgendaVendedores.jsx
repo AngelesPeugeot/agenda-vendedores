@@ -1200,6 +1200,17 @@ export default function AgendaVendedores() {
     [removeCita, showToast]
   );
 
+  // Marca si el cliente asistió o no a la cita. Es una acción directa e inmediata (no espera
+  // a "Guardar cambios"), para poder marcarla en cualquier momento sin tocar el resto de datos
+  // de la cita. valor: true (asistió), false (no asistió), null (sin marcar).
+  const handleSetAsistencia = useCallback(
+    async (id, valor) => {
+      await updateCita(id, { asistio: valor });
+      showToast(valor === true ? "Marcado: asistió" : valor === false ? "Marcado: no asistió" : "Marca de asistencia eliminada");
+    },
+    [updateCita, showToast]
+  );
+
   // ---------- Listado de ventas (histórico anual + cotejo en vivo, independientes) ----------
   // Construye el manejador de subida para un slot concreto ("historico" o "cotejo"),
   // reutilizando la misma lógica de lectura y detección de columnas para ambos.
@@ -1894,6 +1905,54 @@ export default function AgendaVendedores() {
       fechaMax,
     };
   }, [registrosFiltradosInforme, esVendidaRecordGlobal, columnaEstadoExisteGlobal]);
+
+  // ---------- Asistencia a citas (independiente del pipeline de ventas) ----------
+  // Se calcula directamente sobre las citas reales de la agenda (no sobre el conjunto
+  // deduplicado de ventas), aplicando los mismos filtros de mes/rango/gestor/vendedor que el
+  // resto del informe, para no perder el dato "asistio" si esa cita quedó descartada en la
+  // deduplicación por teléfono al combinar con Excel o leads sin cita.
+  const resumenAsistencia = useMemo(() => {
+    const citasMarcadas = todasLasCitas.filter((c) => {
+      if (c.estado === "cancelada") return false;
+      if (c.asistio !== true && c.asistio !== false) return false;
+      const v = vendedores.find((vv) => vv.id === c.vendorId);
+      const g = gestores.find((gg) => gg.id === c.gestorId);
+      const vendedorNombre = v?.nombre || "";
+      const gestorNombre = g?.nombre || "";
+      const fecha = fechaDeCitaSemana(c.weekKey, c.day);
+      const mesAnio = fecha ? `${fecha.getFullYear()}-${String(fecha.getMonth() + 1).padStart(2, "0")}` : "";
+      if (informeFiltroMesAnio && mesAnio !== informeFiltroMesAnio) return false;
+      if (informeFiltroDesde && (!fecha || fecha < new Date(informeFiltroDesde))) return false;
+      if (informeFiltroHasta) {
+        const hasta = new Date(informeFiltroHasta);
+        hasta.setHours(23, 59, 59, 999);
+        if (!fecha || fecha > hasta) return false;
+      }
+      if (informeFiltroGestor && gestorNombre !== informeFiltroGestor) return false;
+      if (informeFiltroVendedor && vendedorNombre !== informeFiltroVendedor) return false;
+      return true;
+    });
+
+    if (citasMarcadas.length === 0) return null;
+
+    const asistieron = citasMarcadas.filter((c) => c.asistio === true).length;
+    const noAsistieron = citasMarcadas.length - asistieron;
+    const tasa = Math.round((asistieron / citasMarcadas.length) * 100);
+
+    const map = {};
+    citasMarcadas.forEach((c) => {
+      const v = vendedores.find((vv) => vv.id === c.vendorId);
+      const nombre = v?.nombre || "Sin especificar";
+      if (!map[nombre]) map[nombre] = { total: 0, asistio: 0 };
+      map[nombre].total += 1;
+      if (c.asistio === true) map[nombre].asistio += 1;
+    });
+    const porVendedor = Object.entries(map)
+      .map(([nombre, d]) => ({ nombre, asistio: d.asistio, total: d.total }))
+      .sort((a, b) => a.asistio / a.total - b.asistio / b.total || b.total - a.total);
+
+    return { total: citasMarcadas.length, asistieron, noAsistieron, tasa, porVendedor };
+  }, [todasLasCitas, vendedores, gestores, informeFiltroMesAnio, informeFiltroDesde, informeFiltroHasta, informeFiltroGestor, informeFiltroVendedor]);
 
   // Exporta el informe (ya filtrado) a un Excel con varias hojas: resumen, desgloses y detalle.
   const handleExportarInforme = useCallback(() => {
@@ -2774,6 +2833,58 @@ export default function AgendaVendedores() {
                     </div>
                   )}
 
+                  {resumenAsistencia && (
+                    <div style={styles.informeChartWrap}>
+                      <div style={styles.informeTablaTitulo}>Asistencia a citas</div>
+                      <div style={styles.panelHint}>
+                        Solo cuenta las citas marcadas manualmente como "Asistió" o "No asistió" desde el modal de cada cita en la agenda.
+                      </div>
+                      <div style={styles.informeStatsRow}>
+                        <div style={styles.informeStatCard}>
+                          <div style={styles.informeStatNumber}>{resumenAsistencia.total}</div>
+                          <div style={styles.informeStatLabel}>Citas marcadas</div>
+                        </div>
+                        <div style={{ ...styles.informeStatCard, borderColor: "#4F9B72" }}>
+                          <div style={{ ...styles.informeStatNumber, color: "#2F5E3F" }}>{resumenAsistencia.asistieron}</div>
+                          <div style={styles.informeStatLabel}>Asistieron</div>
+                        </div>
+                        <div style={{ ...styles.informeStatCard, borderColor: resumenAsistencia.noAsistieron > 0 ? "#C45A2E" : undefined }}>
+                          <div style={{ ...styles.informeStatNumber, color: resumenAsistencia.noAsistieron > 0 ? "#A14B2C" : undefined }}>{resumenAsistencia.noAsistieron}</div>
+                          <div style={styles.informeStatLabel}>No asistieron</div>
+                        </div>
+                        <div style={styles.informeStatCard}>
+                          <div style={styles.informeStatNumber}>{resumenAsistencia.tasa}%</div>
+                          <div style={styles.informeStatLabel}>Tasa de asistencia</div>
+                        </div>
+                      </div>
+                      {resumenAsistencia.porVendedor.length > 0 && (
+                        <div style={{ marginTop: 16 }}>
+                          <div style={styles.informeTablaRows}>
+                            {resumenAsistencia.porVendedor.map((f) => {
+                              const tasaV = f.total > 0 ? Math.round((f.asistio / f.total) * 100) : 0;
+                              return (
+                                <div key={f.nombre} style={styles.informeTablaRow}>
+                                  <span style={styles.informeTablaNombre}>{f.nombre}</span>
+                                  <span style={styles.legendBarWrap}>
+                                    <span
+                                      style={{
+                                        ...styles.legendBar,
+                                        width: `${Math.max(6, tasaV)}%`,
+                                        background: tasaV < 70 ? "#C45A2E" : "#4F9B72",
+                                      }}
+                                    />
+                                  </span>
+                                  <span style={styles.informeTablaCifras}>{f.asistio}/{f.total}</span>
+                                  <span style={styles.informeTablaTasa}>{tasaV}%</span>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
+
                   {leadsDuplicados.length > 0 && (
                     <div style={styles.informeDuplicadosWrap}>
                       <div style={styles.informeTablaTitulo}>
@@ -2912,6 +3023,7 @@ export default function AgendaVendedores() {
                         const g = gestores.find((gg) => gg.id === c.gestorId);
                         const colorV = colorParaSede(v.isla, v.sede);
                         const vendida = citasConVenta.has(c.id);
+                        const noAsistio = c.asistio === false;
                         const fueraDeFiltro = !vendedoresFiltrados.some((vf) => vf.id === v.id);
                         return (
                           <button
@@ -2922,14 +3034,15 @@ export default function AgendaVendedores() {
                               background: colorV.bg,
                               borderColor: colorV.border,
                               color: colorV.text,
-                              opacity: fueraDeFiltro ? 0.4 : 1,
+                              opacity: fueraDeFiltro ? 0.4 : noAsistio ? 0.6 : 1,
                             }}
-                            title={`${v.nombre}${c.cliente ? " · " + c.cliente : ""}${c.telefono ? " · " + c.telefono : ""}${g ? " · Gestor: " + g.nombre : ""}`}
+                            title={`${v.nombre}${c.cliente ? " · " + c.cliente : ""}${c.telefono ? " · " + c.telefono : ""}${g ? " · Gestor: " + g.nombre : ""}${noAsistio ? " · No asistió" : c.asistio === true ? " · Asistió" : ""}`}
                           >
                             <span style={{ ...styles.citaDot, background: colorV.border }} />
                             <span style={styles.citaChipTextWrap}>
                               <span style={styles.citaChipText}>{v.nombre.split(" ")[0]}{c.cliente ? ` · ${c.cliente}` : ""}</span>
                               {g && <span style={styles.citaChipGestor}>Gestor: {g.nombre}</span>}
+                              {noAsistio && <span style={styles.citaChipNoAsistio}>No asistió</span>}
                             </span>
                             {vendida && <Check size={11} color="#4F9B72" style={{ flexShrink: 0 }} />}
                           </button>
@@ -3000,6 +3113,7 @@ export default function AgendaVendedores() {
           onSave={handleSaveCita}
           onCancel={handleCancelCita}
           onDelete={handleDeleteCita}
+          onSetAsistencia={handleSetAsistencia}
         />
       )}
 
@@ -3335,7 +3449,7 @@ function VendedorRow({ vendedor, citasCount, onRemove, onUpdateUbicacion }) {
 }
 
 // ---------- Modal de cita (crear / editar / cancelar / eliminar) ----------
-function CitaModal({ modalCita, vendedores, gestores, vendoresDisponibles, sugerirVendedor, citasDeVendorEnMes, weekDates, dias, ventasParaTelefono, esVendida, onClose, onSave, onCancel, onDelete }) {
+function CitaModal({ modalCita, vendedores, gestores, vendoresDisponibles, sugerirVendedor, citasDeVendorEnMes, weekDates, dias, ventasParaTelefono, esVendida, onClose, onSave, onCancel, onDelete, onSetAsistencia }) {
   const isEdit = !!modalCita.existing;
   const existing = modalCita.existing;
   const day = isEdit ? existing.day : modalCita.day;
@@ -3396,6 +3510,26 @@ function CitaModal({ modalCita, vendedores, gestores, vendoresDisponibles, suger
         {cancelada && (
           <div style={styles.cancelBanner}>
             <AlertCircle size={13} /> Esta cita está cancelada. Puedes reactivarla guardando cambios o eliminarla.
+          </div>
+        )}
+
+        {isEdit && !cancelada && (
+          <div style={styles.asistenciaWrap}>
+            <span style={styles.modalLabel}>¿Asistió el cliente?</span>
+            <div style={styles.informeOrdenToggle}>
+              <button
+                onClick={() => onSetAsistencia(existing.id, existing.asistio === true ? null : true)}
+                style={existing.asistio === true ? styles.asistioBtnActive : styles.informeOrdenBtn}
+              >
+                <Check size={12} /> Asistió
+              </button>
+              <button
+                onClick={() => onSetAsistencia(existing.id, existing.asistio === false ? null : false)}
+                style={existing.asistio === false ? styles.noAsistioBtnActive : styles.informeOrdenBtn}
+              >
+                <X size={12} /> No asistió
+              </button>
+            </div>
           </div>
         )}
 
@@ -3630,6 +3764,7 @@ const styles = {
   citaChipText: { overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
   citaChipTextWrap: { display: "flex", flexDirection: "column", overflow: "hidden", flex: 1, minWidth: 0 },
   citaChipGestor: { fontSize: 9, fontWeight: 500, opacity: 0.75, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
+  citaChipNoAsistio: { fontSize: 9, fontWeight: 700, color: "#A14B2C", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
 
   legendTitulo: { marginTop: 20, fontSize: 12, fontWeight: 600, color: "#7A6B4C" },
   legend: { marginTop: 8, display: "flex", flexDirection: "column", gap: 7, maxWidth: 500 },
@@ -3681,6 +3816,9 @@ const styles = {
   modalTitle: { fontFamily: "var(--font-display)", fontSize: 17, fontWeight: 600 },
   modalSub: { fontSize: 12.5, color: "#8A7B5C", marginTop: 2 },
   cancelBanner: { display: "flex", alignItems: "center", gap: 7, fontSize: 12, background: "#FBF1DE", color: "#8A5E10", padding: "8px 10px", borderRadius: 8, marginBottom: 14, fontWeight: 600 },
+  asistenciaWrap: { display: "flex", alignItems: "center", gap: 10, marginBottom: 14, flexWrap: "wrap" },
+  asistioBtnActive: { display: "flex", alignItems: "center", gap: 4, border: "none", background: "#4F9B72", color: "#fff", fontSize: 11, fontWeight: 600, padding: "4px 9px", borderRadius: 5 },
+  noAsistioBtnActive: { display: "flex", alignItems: "center", gap: 4, border: "none", background: "#C45A2E", color: "#fff", fontSize: 11, fontWeight: 600, padding: "4px 9px", borderRadius: 5 },
   suggestBox: { display: "flex", alignItems: "center", gap: 7, fontSize: 12, background: "#EAF2EC", color: "#2F5E3F", padding: "8px 10px", borderRadius: 8, marginBottom: 14 },
   avisoSobrecargaBox: { display: "flex", alignItems: "flex-start", gap: 7, fontSize: 11.5, background: "#FBF1DE", color: "#8A5E10", padding: "8px 10px", borderRadius: 8, marginTop: 8, lineHeight: 1.4 },
   modalField: { marginBottom: 14 },

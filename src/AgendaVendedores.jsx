@@ -173,6 +173,18 @@ function normalizePhone(raw) {
 // apellido en vez de dos. Estas funciones intentan reconocer que es la misma persona aunque el
 // texto no coincida exactamente, para que el informe agrupe bien en vez de crear una categoría
 // nueva por cada variante de formato.
+// Resuelve si un cliente sin cita está vendido, no vendido, o sin decidir, dando prioridad a
+// una marca manual (puesta por el gestor) sobre el cotejo automático por teléfono con los
+// listados de ventas. true = vendido, false = no vendido, null = sin decidir/sin datos.
+function resolverVendidoManualOAuto(estadoManual, matches, columnaEstadoExiste) {
+  if (estadoManual === true || estadoManual === false) return estadoManual;
+  if (!matches || matches.length === 0) return null;
+  if (!columnaEstadoExiste) return true;
+  if (matches.some((m) => m.vendido === true)) return true;
+  if (matches.some((m) => m.vendido === false)) return false;
+  return null;
+}
+
 function normalizarNombrePersona(s) {
   return String(s || "")
     .normalize("NFD").replace(/[\u0300-\u036f]/g, "") // quita acentos
@@ -1015,6 +1027,47 @@ export default function AgendaVendedores() {
     [removeLeadSinCita, showToast]
   );
 
+  // Marca manualmente el estado de venta de un cliente sin cita (Vendido / No vendido /
+  // Pendiente). Esta marca manual tiene prioridad sobre el cotejo automático por teléfono con
+  // los listados de ventas: si el gestor ya sabe el resultado, no hace falta esperar a que
+  // aparezca en un Excel. valor: true (vendido), false (no vendido), null (sin marcar, vuelve
+  // a depender del cotejo automático).
+  const handleSetEstadoManualLead = useCallback(
+    async (id, valor) => {
+      await updateLeadSinCita(id, { estadoManual: valor });
+      showToast(valor === true ? "Marcado: vendido" : valor === false ? "Marcado: no vendido" : "Marca manual eliminada");
+    },
+    [updateLeadSinCita, showToast]
+  );
+
+  // Nombres de archivo Excel presentes entre los leads importados automáticamente, para poder
+  // borrar por archivo concreto o "todos los importados" de golpe.
+  const archivosImportadosLeads = useMemo(() => {
+    const set = new Set(
+      leadsSinCita.filter((l) => l.origen === "excel" && l.origenArchivo).map((l) => l.origenArchivo)
+    );
+    return Array.from(set);
+  }, [leadsSinCita]);
+
+  // Borra en bloque los clientes sin cita que se crearon automáticamente desde Excel. Si se
+  // pasa un nombre de archivo concreto, solo borra los de ese archivo; si no, borra todos los
+  // que vinieron de cualquier Excel (deja intactos los añadidos a mano).
+  const handleEliminarLeadsImportados = useCallback(
+    async (nombreArchivo) => {
+      const aBorrar = leadsSinCita.filter(
+        (l) => l.origen === "excel" && (!nombreArchivo || l.origenArchivo === nombreArchivo)
+      );
+      if (aBorrar.length === 0) return;
+      const confirma = window.confirm(
+        `Vas a eliminar ${aBorrar.length} cliente(s) sin cita importado(s)${nombreArchivo ? ` desde "${nombreArchivo}"` : ""}. Esta acción no se puede deshacer. ¿Continuar?`
+      );
+      if (!confirma) return;
+      await Promise.all(aBorrar.map((l) => removeLeadSinCita(l.id)));
+      showToast(`${aBorrar.length} cliente(s) importado(s) eliminados`);
+    },
+    [leadsSinCita, removeLeadSinCita, showToast]
+  );
+
   const vendedoresFiltrados = useMemo(() => {
     return vendedores.filter((v) => {
       const okIsla = filtroIslas.length === 0 || filtroIslas.includes(v.isla);
@@ -1376,6 +1429,7 @@ export default function AgendaVendedores() {
                   mesAnio: r.mesAnio || "",
                   creadoEn: new Date().toISOString(),
                   origen: "excel",
+                  origenArchivo: file.name,
                 };
               });
             // Evita duplicados también dentro del propio archivo si el mismo teléfono se repite.
@@ -1489,13 +1543,14 @@ export default function AgendaVendedores() {
   }, [citasActivas, hayVentasCargadas, ventasParaTelefono, esVendida]);
 
   const leadsSinCitaConVenta = useMemo(() => {
-    if (!hayVentasCargadas) return new Set();
     const ids = new Set();
+    const columnaEstadoExiste = todosLosRegistros.some((r) => r.vendido !== null && r.vendido !== undefined);
     leadsSinCita.forEach((l) => {
-      if (l.telefono && esVendida(ventasParaTelefono(l.telefono))) ids.add(l.id);
+      const matches = l.telefono ? ventasParaTelefono(l.telefono) : [];
+      if (resolverVendidoManualOAuto(l.estadoManual, matches, columnaEstadoExiste) === true) ids.add(l.id);
     });
     return ids;
-  }, [leadsSinCita, hayVentasCargadas, ventasParaTelefono, esVendida]);
+  }, [leadsSinCita, ventasParaTelefono, todosLosRegistros]);
 
   // Meses/años presentes en los leads sin cita, ordenados del más reciente al más antiguo,
   // para rellenar el desplegable de filtro sin tener que escribirlos a mano.
@@ -1506,6 +1561,7 @@ export default function AgendaVendedores() {
 
   const leadsSinCitaFiltrados = useMemo(() => {
     const busqueda = leadBusqueda.trim().toLowerCase();
+    const columnaEstadoExiste = todosLosRegistros.some((r) => r.vendido !== null && r.vendido !== undefined);
     return leadsSinCita.filter((l) => {
       if (busqueda) {
         const nombre = (l.cliente || "").toLowerCase();
@@ -1517,12 +1573,13 @@ export default function AgendaVendedores() {
       if (leadFiltroMesAnio && l.mesAnio !== leadFiltroMesAnio) return false;
       if (leadFiltroEstado !== "todos") {
         const matches = ventasParaTelefono(l.telefono);
-        const estado = matches.length === 0 ? "sinregistro" : esVendida(matches) ? "vendido" : "novendido";
+        const vendido = resolverVendidoManualOAuto(l.estadoManual, matches, columnaEstadoExiste);
+        const estado = vendido === true ? "vendido" : vendido === false ? "novendido" : "sinregistro";
         if (estado !== leadFiltroEstado) return false;
       }
       return true;
     });
-  }, [leadsSinCita, leadBusqueda, leadFiltroGestorId, leadFiltroIsla, leadFiltroMesAnio, leadFiltroEstado, ventasParaTelefono, esVendida]);
+  }, [leadsSinCita, leadBusqueda, leadFiltroGestorId, leadFiltroIsla, leadFiltroMesAnio, leadFiltroEstado, ventasParaTelefono, todosLosRegistros]);
 
   // Agrupa los leads ya filtrados por mes o por gestor lead, para que la lista no se muestre
   // como un bloque interminable. Cada grupo se puede plegar/desplegar; por defecto solo el
@@ -1618,11 +1675,7 @@ export default function AgendaVendedores() {
       const g = gestores.find((gg) => gg.id === l.gestorId);
       const matches = ventasParaTelefono(l.telefono);
       const columnaEstadoExiste = todosLosRegistros.some((r) => r.vendido !== null && r.vendido !== undefined);
-      const vendido = matches.length === 0
-        ? null
-        : columnaEstadoExiste
-          ? (matches.some((m) => m.vendido === true) ? true : matches.some((m) => m.vendido === false) ? false : null)
-          : true;
+      const vendido = resolverVendidoManualOAuto(l.estadoManual, matches, columnaEstadoExiste);
       return {
         phone: normalizePhone(l.telefono),
         date: l.creadoEn ? new Date(l.creadoEn) : null,
@@ -2446,6 +2499,28 @@ export default function AgendaVendedores() {
             </div>
           )}
 
+          {leadsSinCita.some((l) => l.origen === "excel") && (
+            <div style={styles.leadLimpiezaBar}>
+              <span style={styles.informeFiltroLabel}>Borrar importados de Excel:</span>
+              {archivosImportadosLeads.map((archivo) => (
+                <button
+                  key={archivo}
+                  onClick={() => handleEliminarLeadsImportados(archivo)}
+                  style={styles.secondaryBtnSmall}
+                  title={`Eliminar los clientes sin cita importados desde "${archivo}"`}
+                >
+                  <Trash2 size={12} /> {archivo}
+                </button>
+              ))}
+              <button
+                onClick={() => handleEliminarLeadsImportados(null)}
+                style={styles.dangerBtnSmall}
+              >
+                <Trash2 size={12} /> Todos los importados
+              </button>
+            </div>
+          )}
+
           {leadsSinCita.length > 0 && (
             <div style={styles.leadAgruparBar}>
               <span style={styles.informeFiltroLabel}>Agrupar por</span>
@@ -2489,10 +2564,12 @@ export default function AgendaVendedores() {
                           {grupo.leads.map((l) => {
                             const v = vendedores.find((vv) => vv.id === l.vendorId);
                             const g = gestores.find((gg) => gg.id === l.gestorId);
-                            const vendido = leadsSinCitaConVenta.has(l.id);
                             const matches = ventasParaTelefono(l.telefono);
+                            const columnaEstadoExiste = todosLosRegistros.some((r) => r.vendido !== null && r.vendido !== undefined);
+                            const vendido = resolverVendidoManualOAuto(l.estadoManual, matches, columnaEstadoExiste);
+                            const esManual = l.estadoManual === true || l.estadoManual === false;
                             return (
-                              <div key={l.id} style={{ ...styles.cotejoRow, borderLeftColor: vendido ? "#4F9B72" : "#E5E0D4" }}>
+                              <div key={l.id} style={{ ...styles.cotejoRow, borderLeftColor: vendido === true ? "#4F9B72" : vendido === false ? "#C45A2E" : "#E5E0D4" }}>
                                 <div style={{ flex: 1, minWidth: 0 }}>
                                   <div style={styles.cotejoName}>
                                     {l.cliente || "Cliente sin nombre"} <span style={styles.cotejoPhone}>{l.telefono}</span>
@@ -2506,18 +2583,32 @@ export default function AgendaVendedores() {
                                     {leadAgruparPor === "gestor" && l.mesAnio ? ` · ${mesAnioLabel(l.mesAnio)}` : ""}
                                   </div>
                                 </div>
-                                {matches.length > 0 ? (
-                                  vendido ? (
-                                    <div style={styles.vendidaTag}>
-                                      <Check size={12} /> Vendido
-                                      {matches[0]?.modelo ? ` · ${matches[0].modelo}` : matches[0]?.coche ? ` · ${matches[0].coche}` : ""}
-                                    </div>
-                                  ) : (
-                                    <div style={styles.pendienteTag}>No vendido</div>
-                                  )
+                                {vendido === true ? (
+                                  <div style={styles.vendidaTag}>
+                                    <Check size={12} /> Vendido
+                                    {!esManual && (matches[0]?.modelo ? ` · ${matches[0].modelo}` : matches[0]?.coche ? ` · ${matches[0].coche}` : "")}
+                                  </div>
+                                ) : vendido === false ? (
+                                  <div style={styles.pendienteTagRojo}>No vendido</div>
                                 ) : (
                                   <div style={styles.pendienteTag}>Sin venta registrada</div>
                                 )}
+                                <div style={styles.leadEstadoManualBotones}>
+                                  <button
+                                    onClick={() => handleSetEstadoManualLead(l.id, l.estadoManual === true ? null : true)}
+                                    style={l.estadoManual === true ? styles.asistioBtnActive : styles.informeOrdenBtn}
+                                    title="Marcar como vendido a mano"
+                                  >
+                                    <Check size={11} />
+                                  </button>
+                                  <button
+                                    onClick={() => handleSetEstadoManualLead(l.id, l.estadoManual === false ? null : false)}
+                                    style={l.estadoManual === false ? styles.noAsistioBtnActive : styles.informeOrdenBtn}
+                                    title="Marcar como no vendido a mano"
+                                  >
+                                    <X size={11} />
+                                  </button>
+                                </div>
                                 <button onClick={() => handleRemoveLeadSinCita(l.id)} style={styles.iconBtn} aria-label={`Eliminar ${l.cliente}`}>
                                   <Trash2 size={15} />
                                 </button>
@@ -3929,6 +4020,8 @@ const styles = {
   secondaryBtnSmall: { display: "flex", alignItems: "center", gap: 5, border: "1px solid #E5E0D4", background: "#fff", color: "#5C5240", borderRadius: 7, padding: "5px 10px", fontSize: 12, fontWeight: 500, whiteSpace: "nowrap" },
   warnBtn: { display: "flex", alignItems: "center", gap: 6, border: "1px solid #E8D2A8", background: "#FBF1DE", color: "#8A5E10", borderRadius: 9, padding: "9px 14px", fontSize: 13, fontWeight: 600 },
   dangerBtn: { display: "flex", alignItems: "center", gap: 6, border: "1px solid #E8BBAB", background: "#FBEDE6", color: "#A14B2C", borderRadius: 9, padding: "9px 14px", fontSize: 13, fontWeight: 600 },
+  dangerBtnSmall: { display: "flex", alignItems: "center", gap: 4, border: "1px solid #E8BBAB", background: "#FBEDE6", color: "#A14B2C", borderRadius: 7, padding: "5px 10px", fontSize: 12, fontWeight: 600 },
+  leadLimpiezaBar: { display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginBottom: 16, padding: "8px 10px", background: "#FBF1DE", borderRadius: 8 },
   iconBtn: { border: "none", background: "transparent", color: "#A89B7E", padding: 6, borderRadius: 7, display: "flex", alignItems: "center", justifyContent: "center" },
   iconBtnConfirm: { border: "none", background: "#EAF2EC", color: "#2F5E3F", padding: 6, borderRadius: 7, display: "flex", alignItems: "center", justifyContent: "center" },
 
@@ -4055,6 +4148,8 @@ const styles = {
   cotejoMeta: { fontSize: 11.5, color: "#8A7B5C", marginTop: 1 },
   vendidaTag: { display: "flex", alignItems: "center", gap: 4, fontSize: 11, fontWeight: 600, color: "#2F5E3F", background: "#EAF2EC", padding: "4px 8px", borderRadius: 7, whiteSpace: "nowrap" },
   pendienteTag: { fontSize: 11, color: "#A89B7E", whiteSpace: "nowrap" },
+  pendienteTagRojo: { fontSize: 11, fontWeight: 600, color: "#A14B2C", whiteSpace: "nowrap" },
+  leadEstadoManualBotones: { display: "flex", gap: 3, flexShrink: 0 },
 
   phoneInputWrap: { display: "flex", alignItems: "center", gap: 7, border: "1px solid #E5E0D4", borderRadius: 9, padding: "9px 12px", background: "#fff" },
   phoneInput: { flex: 1, border: "none", outline: "none", fontSize: 13.5, background: "transparent", color: "#2B2620" },

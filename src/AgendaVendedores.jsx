@@ -2111,52 +2111,23 @@ export default function AgendaVendedores() {
         {vendedores.length > 0 && (
           <div style={styles.filterBar}>
             <MapPin size={13} color="#A89B7E" style={{ flexShrink: 0 }} />
-            <div style={styles.filterChips}>
-              {ISLAS.filter((isla) => vendedores.some((v) => v.isla === isla)).map((isla) => {
-                const colorIsla = PALETA_ISLAS[isla]?.hue || "#5C5240";
-                const activo = filtroIslas.includes(isla);
-                return (
-                  <button
-                    key={isla}
-                    onClick={() => toggleFiltroIsla(isla)}
-                    style={{
-                      ...styles.filterChip,
-                      borderColor: activo ? colorIsla : "#E5E0D4",
-                      background: activo ? colorIsla : "#fff",
-                      color: activo ? "#fff" : "#5C5240",
-                    }}
-                  >
-                    <span style={{ ...styles.filterDot, background: activo ? "#fff" : colorIsla }} />
-                    {isla}
-                  </button>
-                );
-              })}
-              {sedesFiltrablesDisponibles.filter((sede) => vendedores.some((v) => v.sede === sede)).length > 0 && (
-                <span style={styles.filterDivider} />
-              )}
-              {sedesFiltrablesDisponibles
-                .filter((sede) => vendedores.some((v) => v.sede === sede))
-                .map((sede) => {
-                  const islaDeSede = ISLAS.find((i) => (ISLAS_SEDES[i] || []).includes(sede));
-                  const c = colorParaSede(islaDeSede, sede);
-                  const activo = filtroSedes.includes(sede);
-                  return (
-                    <button
-                      key={sede}
-                      onClick={() => toggleFiltroSede(sede)}
-                      style={{
-                        ...styles.filterChipSede,
-                        borderColor: activo ? c.border : "#E5E0D4",
-                        background: activo ? c.bg : "#F7F3E8",
-                        color: activo ? c.text : "#7A6B4C",
-                      }}
-                    >
-                      <span style={{ ...styles.filterDot, background: c.border }} />
-                      {sede}
-                    </button>
-                  );
-                })}
-            </div>
+            <FiltroDesplegable
+              etiqueta="Isla"
+              opciones={ISLAS.filter((isla) => vendedores.some((v) => v.isla === isla))}
+              seleccionados={filtroIslas}
+              onToggle={toggleFiltroIsla}
+              colorDe={(isla) => PALETA_ISLAS[isla]?.hue || "#5C5240"}
+            />
+            <FiltroDesplegable
+              etiqueta="Sede"
+              opciones={sedesFiltrablesDisponibles.filter((sede) => vendedores.some((v) => v.sede === sede))}
+              seleccionados={filtroSedes}
+              onToggle={toggleFiltroSede}
+              colorDe={(sede) => {
+                const islaDeSede = ISLAS.find((i) => (ISLAS_SEDES[i] || []).includes(sede));
+                return colorParaSede(islaDeSede, sede).border;
+              }}
+            />
             {(filtroIslas.length > 0 || filtroSedes.length > 0) && (
               <button onClick={limpiarFiltros} style={styles.filterClear}>
                 <X size={11} /> Limpiar
@@ -3126,6 +3097,56 @@ function FragmentRow({ children }) {
   return <>{children}</>;
 }
 
+// ---------- Botón con desplegable de opciones marcables (multi-selección) ----------
+// Sustituye a las hileras de chips: un botón muestra el nombre del filtro (y cuántas opciones
+// hay activas), y al pulsarlo despliega un panel con checkboxes para cada opción. Se cierra
+// solo al hacer clic fuera.
+function FiltroDesplegable({ etiqueta, icono: Icono, opciones, seleccionados, onToggle, colorDe }) {
+  const [abierto, setAbierto] = useState(false);
+  const ref = useRef(null);
+
+  useEffect(() => {
+    if (!abierto) return;
+    const cerrarSiFuera = (e) => {
+      if (ref.current && !ref.current.contains(e.target)) setAbierto(false);
+    };
+    document.addEventListener("mousedown", cerrarSiFuera);
+    return () => document.removeEventListener("mousedown", cerrarSiFuera);
+  }, [abierto]);
+
+  if (opciones.length === 0) return null;
+  const hayActivos = seleccionados.length > 0;
+
+  return (
+    <div style={styles.filtroDesplegableWrap} ref={ref}>
+      <button
+        onClick={() => setAbierto((v) => !v)}
+        style={hayActivos ? styles.filtroDesplegableBtnActivo : styles.filtroDesplegableBtn}
+      >
+        {Icono && <Icono size={13} />}
+        {etiqueta}
+        {hayActivos && <span style={styles.filtroDesplegableBadge}>{seleccionados.length}</span>}
+        <ChevronDown size={13} style={{ opacity: 0.6, transform: abierto ? "rotate(180deg)" : "none" }} />
+      </button>
+      {abierto && (
+        <div style={styles.filtroDesplegableMenu}>
+          {opciones.map((op) => {
+            const activo = seleccionados.includes(op);
+            const color = colorDe ? colorDe(op) : "#5C5240";
+            return (
+              <label key={op} style={styles.filtroDesplegableOpcion}>
+                <input type="checkbox" checked={activo} onChange={() => onToggle(op)} style={styles.filtroDesplegableCheckbox} />
+                <span style={{ ...styles.filterDot, background: color }} />
+                <span>{op}</span>
+              </label>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ---------- Tabla de desglose para el informe anual ----------
 // Permite alternar el orden entre volumen (vendidos) y tasa de conversión (%), y expandir
 // cada fila para ver el detalle de los registros concretos que la componen.
@@ -3688,12 +3709,15 @@ const styles = {
   balanceSold: { display: "flex", alignItems: "center", gap: 4, fontSize: 12, color: "#2F5E3F", background: "#EAF2EC", padding: "5px 9px", borderRadius: 7, fontWeight: 600 },
 
   filterBar: { display: "flex", alignItems: "center", gap: 8, marginTop: 12, paddingTop: 12, borderTop: "1px solid #EFE9DA", flexWrap: "wrap" },
-  filterChips: { display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" },
   filterDot: { width: 6, height: 6, borderRadius: "50%", display: "inline-block" },
-  filterChip: { display: "flex", alignItems: "center", gap: 5, border: "1px solid #E5E0D4", background: "#fff", color: "#5C5240", borderRadius: 999, padding: "4px 11px", fontSize: 12, fontWeight: 600 },
-  filterChipSede: { display: "flex", alignItems: "center", gap: 5, border: "1px solid #E5E0D4", background: "#F7F3E8", color: "#7A6B4C", borderRadius: 999, padding: "4px 11px", fontSize: 11.5, fontWeight: 500 },
-  filterDivider: { width: 1, height: 16, background: "#E5E0D4", margin: "0 2px" },
   filterClear: { display: "flex", alignItems: "center", gap: 4, border: "none", background: "transparent", color: "#A14B2C", fontSize: 12, fontWeight: 600, padding: "4px 6px", marginLeft: "auto" },
+  filtroDesplegableWrap: { position: "relative" },
+  filtroDesplegableBtn: { display: "flex", alignItems: "center", gap: 6, border: "1px solid #E5E0D4", background: "#fff", color: "#5C5240", borderRadius: 8, padding: "6px 11px", fontSize: 12.5, fontWeight: 500 },
+  filtroDesplegableBtnActivo: { display: "flex", alignItems: "center", gap: 6, border: "1px solid #C45A2E", background: "#FBEFE6", color: "#A14B2C", borderRadius: 8, padding: "6px 11px", fontSize: 12.5, fontWeight: 600 },
+  filtroDesplegableBadge: { background: "#C45A2E", color: "#fff", fontSize: 10.5, fontWeight: 700, borderRadius: 999, padding: "1px 6px", minWidth: 16, textAlign: "center" },
+  filtroDesplegableMenu: { position: "absolute", top: "calc(100% + 6px)", left: 0, background: "#fff", border: "1px solid #EBE4D3", borderRadius: 10, boxShadow: "0 8px 24px rgba(0,0,0,0.12)", padding: 8, minWidth: 190, maxHeight: 280, overflowY: "auto", zIndex: 40, display: "flex", flexDirection: "column", gap: 2 },
+  filtroDesplegableOpcion: { display: "flex", alignItems: "center", gap: 8, padding: "7px 8px", borderRadius: 6, fontSize: 13, color: "#5C5240", cursor: "pointer" },
+  filtroDesplegableCheckbox: { width: 14, height: 14, flexShrink: 0, accentColor: "#C45A2E" },
 
   emptyState: { display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: "70px 20px", gap: 8, textAlign: "center" },
   emptyIcon: { fontSize: 34, marginBottom: 4 },

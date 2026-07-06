@@ -4,6 +4,7 @@ import {
   getDatabase,
   ref,
   onValue,
+  get,
   set,
   remove,
   update,
@@ -401,6 +402,7 @@ function fechaDeCitaSemana(weekKey, day) {
 //   gestores/{id}               -> {nombre}  (gestor lead: crea la cita, distinto del vendedor)
 //   leadsSinCita/{id}            -> {cliente, telefono, gestorId, vendorId, isla, sede, creadoEn}
 //   vacaciones/{id}               -> {vendorId, desde, hasta, origen}  (desde/hasta en formato YYYY-MM-DD)
+//   horariosHabituales/{vendorId} -> {horasLV: [...], horasSabado: [...]}  (base recurrente, no por semana)
 //   turnos/{weekKey}_{vendorId} -> {weekKey, vendorId, dias: {0:[...],...}}
 //   citas/{id}                  -> {weekKey, vendorId, gestorId, day, hour, cliente, telefono}
 //   ventas/historico             -> {fileName, uploadedAt, records}  (se sube una vez, KPIs anuales)
@@ -559,6 +561,42 @@ function useVacacionesSync() {
   }, []);
 
   return { vacaciones, loadingVacaciones, addVacacion, addVacacionesEnLote, removeVacacion };
+}
+
+// Horario habitual por vendedor: el patrón de lunes-a-viernes y sábado que esa persona repite
+// casi todas las semanas. Se guarda UNA vez por vendedor (no por semana) y se usa como base
+// automática: si una semana concreta no tiene un horario explícito guardado para ese vendedor,
+// se aplica el habitual sin que haga falta tocar nada. Editar el horario de una semana concreta
+// NUNCA modifica este habitual de fondo — son cosas independientes.
+function useHorariosHabitualesSync() {
+  const [horariosHabituales, setHorariosHabituales] = useState({});
+  const [loadingHorariosHabituales, setLoadingHorariosHabituales] = useState(true);
+
+  useEffect(() => {
+    if (!firebaseDisponible) {
+      setLoadingHorariosHabituales(false);
+      return;
+    }
+    const refHabituales = ref(db, "horariosHabituales");
+    const unsub = onValue(refHabituales, (snap) => {
+      setHorariosHabituales(snap.val() || {});
+      setLoadingHorariosHabituales(false);
+    }, (err) => {
+      console.error("Error sincronizando horarios habituales", err);
+      setLoadingHorariosHabituales(false);
+    });
+    return () => unsub();
+  }, []);
+
+  const setHorarioHabitual = useCallback(async (vendorId, camposParciales) => {
+    if (!firebaseDisponible) {
+      setHorariosHabituales((prev) => ({ ...prev, [vendorId]: { ...(prev[vendorId] || {}), ...camposParciales } }));
+      return;
+    }
+    await update(ref(db, `horariosHabituales/${vendorId}`), camposParciales);
+  }, []);
+
+  return { horariosHabituales, loadingHorariosHabituales, setHorarioHabitual };
 }
 
 // Leads sin cita: clientes que reciben presupuesto o se derivan directamente a un vendedor
@@ -778,6 +816,7 @@ export default function AgendaVendedores() {
   const { vendedores, loading, addVendedor, removeVendedor, updateVendedor } = useVendedoresSync();
   const { gestores, loadingGestores, addGestor, removeGestor } = useGestoresSync();
   const { vacaciones, addVacacion, addVacacionesEnLote, removeVacacion } = useVacacionesSync();
+  const { horariosHabituales, setHorarioHabitual } = useHorariosHabitualesSync();
   const { leadsSinCita, addLeadSinCita, addLeadsSinCitaEnLote, updateLeadSinCita, removeLeadSinCita } = useLeadsSinCitaSync();
   const { turnos, setTurnoVendorDia } = useTurnosSync(weekKey);
   const { citas, addCita, updateCita, removeCita } = useCitasSync(weekKey);
@@ -1121,9 +1160,26 @@ export default function AgendaVendedores() {
     [turnos, setTurnoVendorDia]
   );
 
+  // Si la semana actual no tiene un horario explícito guardado para ese vendedor (ni para el
+  // grupo lunes-viernes ni para el sábado, por separado), se usa su horario habitual como base.
+  // Se distingue "sin datos esta semana" (aplicar habitual) de "datos guardados pero vacíos"
+  // (el vendedor no trabaja ese grupo de días esta semana en concreto, una excepción puntual)
+  // mirando si la clave del día 0 (o 5) existe en absoluto en los turnos de esa semana.
   const isWorking = useCallback(
-    (vendorId, dayIdx, hour) => (turnos[vendorId]?.[dayIdx] || []).includes(hour),
-    [turnos]
+    (vendorId, dayIdx, hour) => {
+      const registrosSemana = turnos[vendorId];
+      const esGrupoLV = dayIdx <= 4;
+      const claveGrupo = esGrupoLV ? 0 : 5;
+      const explicitoEstaSemana = registrosSemana && registrosSemana[claveGrupo] !== undefined;
+      if (explicitoEstaSemana) {
+        return (registrosSemana[dayIdx] || []).includes(hour);
+      }
+      const habitual = horariosHabituales[vendorId];
+      if (!habitual) return false;
+      const horasHabitual = esGrupoLV ? habitual.horasLV : habitual.horasSabado;
+      return (horasHabitual || []).includes(hour);
+    },
+    [turnos, horariosHabituales]
   );
 
   // Comprueba si un vendedor está de vacaciones en una fecha concreta (comparando por día,
@@ -1169,6 +1225,57 @@ export default function AgendaVendedores() {
     },
     [turnos, setTurnoVendorDia]
   );
+
+  // Quita la excepción de esta semana concreta para un grupo de días (L-V o Sábado), volviendo
+  // a depender automáticamente del horario habitual de ese vendedor a partir de ahora.
+  const quitarExcepcionSemana = useCallback(
+    async (vendorId, diasIdx) => {
+      const actual = { ...(turnos[vendorId] || {}) };
+      diasIdx.forEach((dayIdx) => {
+        delete actual[dayIdx];
+      });
+      await setTurnoVendorDia(vendorId, actual);
+    },
+    [turnos, setTurnoVendorDia]
+  );
+
+  // "Copiar semana anterior": trae el horario explícito que hubiera la semana pasada (si lo
+  // hay) y lo aplica como excepción de esta semana. Útil para cambios temporales de varias
+  // semanas que no quieres convertir en el horario habitual permanente.
+  const weekKeyAnterior = useMemo(() => fmtWeekKey(addDays(weekStart, -7)), [weekStart]);
+
+  const handleCopiarSemanaAnteriorVendedor = useCallback(
+    async (vendorId) => {
+      if (!firebaseDisponible) {
+        showToast("Copiar la semana anterior requiere estar conectado a Firebase.");
+        return;
+      }
+      const snap = await get(ref(db, `turnos/${weekKeyAnterior}/${vendorId}`));
+      const datosAnteriores = snap.exists() ? snap.val() : null;
+      if (!datosAnteriores) {
+        showToast("Ese vendedor no tenía un horario guardado la semana pasada.");
+        return;
+      }
+      await setTurnoVendorDia(vendorId, datosAnteriores);
+      showToast("Horario de la semana anterior copiado");
+    },
+    [weekKeyAnterior, setTurnoVendorDia, showToast]
+  );
+
+  const handleCopiarSemanaAnteriorTodos = useCallback(async () => {
+    if (!firebaseDisponible) {
+      showToast("Copiar la semana anterior requiere estar conectado a Firebase.");
+      return;
+    }
+    const snap = await get(ref(db, `turnos/${weekKeyAnterior}`));
+    const datosAnteriores = snap.exists() ? snap.val() : null;
+    if (!datosAnteriores || Object.keys(datosAnteriores).length === 0) {
+      showToast("No hay turnos guardados de la semana pasada.");
+      return;
+    }
+    await update(ref(db, `turnos/${weekKey}`), datosAnteriores);
+    showToast(`Copiados los turnos de ${Object.keys(datosAnteriores).length} vendedor(es) de la semana pasada`);
+  }, [weekKeyAnterior, weekKey, showToast]);
 
   // ---------- Citas ----------
   const vendoresDisponibles = useCallback(
@@ -2708,9 +2815,35 @@ export default function AgendaVendedores() {
 
       {vendedores.length > 0 && vista === "turnos" && (
         <div style={styles.panel}>
-          <div style={styles.panelTitle}>Turnos rotativos de la semana</div>
+          <div style={styles.panelTitle}>Horario habitual</div>
           <div style={styles.panelHint}>
-            Escribe el horario de cada vendedor como texto, por ejemplo <strong>9:00-13:30, 16:30-20:00</strong>. El de lunes a viernes se aplica a los 5 días de golpe; el sábado es independiente. Deja el campo vacío para marcar que no trabaja ese día. Se muestran los vendedores según el filtro de Isla/Sede/Marca activo en la cabecera de arriba.
+            El horario que cada vendedor repite casi todas las semanas. Se aplica automáticamente cada semana sin que tengas que hacer nada — solo entra en "Turnos de esta semana" (más abajo) si alguien tiene una excepción puntual esa semana en concreto.
+          </div>
+          {vendedoresFiltrados.length === 0 && (
+            <div style={styles.noVendorWarn}>Ningún vendedor coincide con el filtro de isla/sede/marca seleccionado.</div>
+          )}
+          {vendedoresFiltrados.map((v) => (
+            <VendedorHorarioHabitualTexto
+              key={v.id}
+              vendedor={v}
+              horarioHabitual={horariosHabituales[v.id]}
+              onGuardar={setHorarioHabitual}
+              showToast={showToast}
+            />
+          ))}
+        </div>
+      )}
+
+      {vendedores.length > 0 && vista === "turnos" && (
+        <div style={styles.panel}>
+          <div style={styles.informeTablaHeaderRow}>
+            <div style={styles.panelTitle}>Turnos de esta semana (excepciones)</div>
+            <button onClick={handleCopiarSemanaAnteriorTodos} style={styles.secondaryBtnSmall}>
+              Copiar todos de la semana pasada
+            </button>
+          </div>
+          <div style={styles.panelHint}>
+            Por defecto se usa el horario habitual de cada uno. Escribe aquí solo si alguien tiene una excepción esta semana concreta (ej. <strong>9:00-13:30, 16:30-20:00</strong>); no afecta a su horario habitual. Deja el campo vacío para marcar que no trabaja ese día. Se muestran los vendedores según el filtro de Isla/Sede/Marca activo en la cabecera de arriba.
           </div>
           {vendedoresFiltrados.length === 0 && (
             <div style={styles.noVendorWarn}>Ningún vendedor coincide con el filtro de isla/sede/marca seleccionado.</div>
@@ -2720,7 +2853,10 @@ export default function AgendaVendedores() {
               key={v.id}
               vendedor={v}
               turnos={turnos[v.id] || {}}
+              horarioHabitual={horariosHabituales[v.id]}
               onAplicar={aplicarHorarioTexto}
+              onQuitarExcepcion={quitarExcepcionSemana}
+              onCopiarSemanaAnterior={handleCopiarSemanaAnteriorVendedor}
               showToast={showToast}
             />
           ))}
@@ -3504,21 +3640,32 @@ function InformeTabla({ titulo, filas, usarGrafico }) {
 }
 
 // ---------- Turno por vendedor, editado como texto (L-V y Sábado por separado) ----------
-function VendedorTurnoTexto({ vendedor, turnos, onAplicar, showToast }) {
+// Si esta semana no tiene una excepción explícita guardada para un grupo de días (L-V o
+// Sábado), se muestra y aplica automáticamente el horario habitual de ese vendedor. Al escribir
+// y pulsar "Aplicar" se crea una excepción SOLO para esta semana, sin tocar el horario habitual.
+function VendedorTurnoTexto({ vendedor, turnos, horarioHabitual, onAplicar, onQuitarExcepcion, onCopiarSemanaAnterior, showToast }) {
   const c = colorParaSede(vendedor.isla, vendedor.sede);
 
   // Días de lunes a viernes son los índices 0-4; sábado es el índice 5.
   const diasLV = [0, 1, 2, 3, 4];
   const diaSabado = 5;
 
+  // La presencia de la clave del día 0 (o 5) en los turnos de esta semana indica que ese grupo
+  // tiene una excepción explícita esta semana; si no está presente, se está usando el habitual.
+  const excepcionLV = turnos[0] !== undefined;
+  const excepcionSabado = turnos[5] !== undefined;
+
+  const horasEfectivasLV = excepcionLV ? (turnos[0] || []) : (horarioHabitual?.horasLV || []);
+  const horasEfectivasSabado = excepcionSabado ? (turnos[5] || []) : (horarioHabitual?.horasSabado || []);
+
   // Si los 5 días de lunes a viernes ya tienen exactamente el mismo horario guardado, lo
   // mostramos como punto de partida. Si hay alguna diferencia entre ellos (por ejemplo datos
   // antiguos con horarios distintos por día), dejamos el campo vacío en vez de mostrar uno
   // cualquiera, para no dar una falsa sensación de que todos coinciden.
   const horariosLV = diasLV.map((d) => JSON.stringify((turnos[d] || []).slice().sort((a, b) => a - b)));
-  const todosIguales = horariosLV.every((h) => h === horariosLV[0]);
-  const textoInicialLV = todosIguales ? horasATexto(turnos[diasLV[0]] || []) : "";
-  const textoInicialSabado = horasATexto(turnos[diaSabado] || []);
+  const todosIguales = !excepcionLV || horariosLV.every((h) => h === horariosLV[0]);
+  const textoInicialLV = todosIguales ? horasATexto(horasEfectivasLV) : "";
+  const textoInicialSabado = horasATexto(horasEfectivasSabado);
 
   const [textoLV, setTextoLV] = useState(textoInicialLV);
   const [textoSabado, setTextoSabado] = useState(textoInicialSabado);
@@ -3541,7 +3688,7 @@ function VendedorTurnoTexto({ vendedor, turnos, onAplicar, showToast }) {
       await onAplicar(vendedor.id, diasLV, textoLV);
       setErrorLV(null);
       setTocadoLV(false);
-      showToast(`Horario de lunes a viernes guardado para ${vendedor.nombre}`);
+      showToast(`Excepción de esta semana guardada para ${vendedor.nombre}`);
     } catch (e) {
       setErrorLV(e.message);
     }
@@ -3552,11 +3699,142 @@ function VendedorTurnoTexto({ vendedor, turnos, onAplicar, showToast }) {
       await onAplicar(vendedor.id, [diaSabado], textoSabado);
       setErrorSabado(null);
       setTocadoSabado(false);
-      showToast(`Horario del sábado guardado para ${vendedor.nombre}`);
+      showToast(`Excepción del sábado guardada para ${vendedor.nombre}`);
     } catch (e) {
       setErrorSabado(e.message);
     }
   }, [onAplicar, vendedor.id, vendedor.nombre, textoSabado, showToast]);
+
+  const quitarLV = useCallback(async () => {
+    await onQuitarExcepcion(vendedor.id, diasLV);
+    setTocadoLV(false);
+    showToast(`${vendedor.nombre} vuelve a su horario habitual de lunes a viernes`);
+  }, [onQuitarExcepcion, vendedor.id, vendedor.nombre, showToast]);
+
+  const quitarSabado = useCallback(async () => {
+    await onQuitarExcepcion(vendedor.id, [diaSabado]);
+    setTocadoSabado(false);
+    showToast(`${vendedor.nombre} vuelve a su sábado habitual`);
+  }, [onQuitarExcepcion, vendedor.id, vendedor.nombre, showToast]);
+
+  return (
+    <div style={styles.turnoTextoBlock}>
+      <div style={styles.turnoVendorHeader}>
+        <div style={{ ...styles.vendorDot, background: c.border }} />
+        <span style={styles.turnoVendorName}>{vendedor.nombre}</span>
+        <span style={styles.turnoVendorLoc}>{vendedor.sede}, {vendedor.isla}</span>
+        <button onClick={() => onCopiarSemanaAnterior(vendedor.id)} style={styles.copiarSemanaBtn} title="Copiar el horario de la semana pasada como excepción de esta semana">
+          Copiar semana pasada
+        </button>
+      </div>
+      <div style={styles.turnoTextoRow}>
+        <label style={styles.turnoTextoLabel}>Lunes a viernes</label>
+        <input
+          value={textoLV}
+          onChange={(e) => {
+            setTextoLV(e.target.value);
+            setTocadoLV(true);
+            setErrorLV(null);
+          }}
+          onKeyDown={(e) => e.key === "Enter" && guardarLV()}
+          placeholder="ej. 9:00-13:30, 16:30-20:00"
+          style={{ ...styles.input, ...(errorLV ? styles.inputError : {}) }}
+        />
+        <button onClick={guardarLV} style={styles.secondaryBtnSmall}>
+          <Check size={12} /> Aplicar
+        </button>
+        {excepcionLV ? (
+          <span style={styles.badgeExcepcion}>Excepción esta semana</span>
+        ) : (
+          <span style={styles.badgeHabitual}>Habitual</span>
+        )}
+        {excepcionLV && (
+          <button onClick={quitarLV} style={styles.filterClear} title="Volver al horario habitual esta semana">
+            <X size={11} /> Quitar excepción
+          </button>
+        )}
+      </div>
+      {errorLV && <div style={styles.turnoTextoError}>{errorLV}</div>}
+      {excepcionLV && !todosIguales && !tocadoLV && (
+        <div style={styles.turnoTextoAviso}>Los días de esta semana tienen horarios distintos entre sí. Escribe uno para igualarlos todos.</div>
+      )}
+
+      <div style={styles.turnoTextoRow}>
+        <label style={styles.turnoTextoLabel}>Sábado</label>
+        <input
+          value={textoSabado}
+          onChange={(e) => {
+            setTextoSabado(e.target.value);
+            setTocadoSabado(true);
+            setErrorSabado(null);
+          }}
+          onKeyDown={(e) => e.key === "Enter" && guardarSabado()}
+          placeholder="ej. 10:00-13:00 (vacío si no trabaja)"
+          style={{ ...styles.input, ...(errorSabado ? styles.inputError : {}) }}
+        />
+        <button onClick={guardarSabado} style={styles.secondaryBtnSmall}>
+          <Check size={12} /> Aplicar
+        </button>
+        {excepcionSabado ? (
+          <span style={styles.badgeExcepcion}>Excepción esta semana</span>
+        ) : (
+          <span style={styles.badgeHabitual}>Habitual</span>
+        )}
+        {excepcionSabado && (
+          <button onClick={quitarSabado} style={styles.filterClear} title="Volver al horario habitual esta semana">
+            <X size={11} /> Quitar excepción
+          </button>
+        )}
+      </div>
+      {errorSabado && <div style={styles.turnoTextoError}>{errorSabado}</div>}
+    </div>
+  );
+}
+
+// ---------- Horario habitual por vendedor (base recurrente, independiente de la semana) ----------
+function VendedorHorarioHabitualTexto({ vendedor, horarioHabitual, onGuardar, showToast }) {
+  const c = colorParaSede(vendedor.isla, vendedor.sede);
+
+  const textoInicialLV = horasATexto(horarioHabitual?.horasLV || []);
+  const textoInicialSabado = horasATexto(horarioHabitual?.horasSabado || []);
+
+  const [textoLV, setTextoLV] = useState(textoInicialLV);
+  const [textoSabado, setTextoSabado] = useState(textoInicialSabado);
+  const [errorLV, setErrorLV] = useState(null);
+  const [errorSabado, setErrorSabado] = useState(null);
+  const [tocadoLV, setTocadoLV] = useState(false);
+  const [tocadoSabado, setTocadoSabado] = useState(false);
+
+  useEffect(() => {
+    if (!tocadoLV) setTextoLV(textoInicialLV);
+  }, [textoInicialLV, tocadoLV]);
+  useEffect(() => {
+    if (!tocadoSabado) setTextoSabado(textoInicialSabado);
+  }, [textoInicialSabado, tocadoSabado]);
+
+  const guardarLV = useCallback(async () => {
+    try {
+      const horas = parseHorarioTexto(textoLV);
+      await onGuardar(vendedor.id, { horasLV: horas });
+      setErrorLV(null);
+      setTocadoLV(false);
+      showToast(`Horario habitual (L-V) actualizado para ${vendedor.nombre}`);
+    } catch (e) {
+      setErrorLV(e.message);
+    }
+  }, [onGuardar, vendedor.id, vendedor.nombre, textoLV, showToast]);
+
+  const guardarSabado = useCallback(async () => {
+    try {
+      const horas = parseHorarioTexto(textoSabado);
+      await onGuardar(vendedor.id, { horasSabado: horas });
+      setErrorSabado(null);
+      setTocadoSabado(false);
+      showToast(`Horario habitual (sábado) actualizado para ${vendedor.nombre}`);
+    } catch (e) {
+      setErrorSabado(e.message);
+    }
+  }, [onGuardar, vendedor.id, vendedor.nombre, textoSabado, showToast]);
 
   return (
     <div style={styles.turnoTextoBlock}>
@@ -3579,13 +3857,10 @@ function VendedorTurnoTexto({ vendedor, turnos, onAplicar, showToast }) {
           style={{ ...styles.input, ...(errorLV ? styles.inputError : {}) }}
         />
         <button onClick={guardarLV} style={styles.secondaryBtnSmall}>
-          <Check size={12} /> Aplicar
+          <Check size={12} /> Guardar
         </button>
       </div>
       {errorLV && <div style={styles.turnoTextoError}>{errorLV}</div>}
-      {!todosIguales && !tocadoLV && (
-        <div style={styles.turnoTextoAviso}>Los días de esta semana tienen horarios distintos entre sí. Escribe uno para igualarlos todos.</div>
-      )}
 
       <div style={styles.turnoTextoRow}>
         <label style={styles.turnoTextoLabel}>Sábado</label>
@@ -3597,11 +3872,11 @@ function VendedorTurnoTexto({ vendedor, turnos, onAplicar, showToast }) {
             setErrorSabado(null);
           }}
           onKeyDown={(e) => e.key === "Enter" && guardarSabado()}
-          placeholder="ej. 10:00-13:00 (vacío si no trabaja)"
+          placeholder="ej. 10:00-13:00 (vacío si no trabaja normalmente)"
           style={{ ...styles.input, ...(errorSabado ? styles.inputError : {}) }}
         />
         <button onClick={guardarSabado} style={styles.secondaryBtnSmall}>
-          <Check size={12} /> Aplicar
+          <Check size={12} /> Guardar
         </button>
       </div>
       {errorSabado && <div style={styles.turnoTextoError}>{errorSabado}</div>}
@@ -4048,10 +4323,13 @@ const styles = {
 
   turnoBlock: { marginBottom: 26 },
   turnoTextoBlock: { marginBottom: 22, background: "#fff", border: "1px solid #EBE4D3", borderRadius: 10, padding: "14px 16px", maxWidth: 620 },
-  turnoTextoRow: { display: "flex", alignItems: "center", gap: 8, marginTop: 8 },
+  turnoTextoRow: { display: "flex", alignItems: "center", gap: 8, marginTop: 8, flexWrap: "wrap" },
   turnoTextoLabel: { fontSize: 12, fontWeight: 600, color: "#7A6B4C", width: 95, flexShrink: 0 },
   turnoTextoError: { fontSize: 11.5, color: "#A14B2C", marginTop: 4, marginLeft: 103 },
   turnoTextoAviso: { fontSize: 11.5, color: "#8A5E10", marginTop: 4, marginLeft: 103 },
+  copiarSemanaBtn: { marginLeft: "auto", border: "1px solid #E5E0D4", background: "#fff", color: "#7A6B4C", fontSize: 11, fontWeight: 500, padding: "4px 9px", borderRadius: 7 },
+  badgeHabitual: { fontSize: 10, fontWeight: 600, color: "#8A7B5C", background: "#F1EAD9", padding: "2px 8px", borderRadius: 999, whiteSpace: "nowrap" },
+  badgeExcepcion: { fontSize: 10, fontWeight: 600, color: "#8A5E10", background: "#FBF1DE", padding: "2px 8px", borderRadius: 999, whiteSpace: "nowrap" },
   inputError: { borderColor: "#D98A6F" },
   turnoVendorHeader: { display: "flex", alignItems: "center", gap: 8, marginBottom: 8 },
   turnoVendorName: { fontSize: 13.5, fontWeight: 600 },

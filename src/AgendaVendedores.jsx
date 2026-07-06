@@ -1657,6 +1657,13 @@ export default function AgendaVendedores() {
     return set;
   }, [weekDates, vendedores, estaDeVacaciones]);
 
+  // Vacaciones a mostrar en la pestaña Turnos, respetando el filtro global de Isla/Sede/Marca.
+  const vacacionesFiltradas = useMemo(() => {
+    return [...vacaciones]
+      .filter((vac) => vendedoresFiltrados.some((v) => v.id === vac.vendorId))
+      .sort((a, b) => (b.hasta || "").localeCompare(a.hasta || ""));
+  }, [vacaciones, vendedoresFiltrados]);
+
   const citasPorGestor = useMemo(() => {
     const map = {};
     gestores.forEach((g) => (map[g.id] = 0));
@@ -2264,6 +2271,9 @@ export default function AgendaVendedores() {
       {vendedores.length >= 0 && vista === "vendedores" && (
         <div style={styles.panel}>
           <div style={styles.panelTitle}>Equipo de ventas</div>
+          <div style={styles.panelHint}>
+            Se muestran los vendedores según el filtro de Isla/Sede/Marca activo en la cabecera de arriba.
+          </div>
           <div style={styles.addRow}>
             <input
               value={nuevoVendedorNombre}
@@ -2318,7 +2328,10 @@ export default function AgendaVendedores() {
             </button>
           </div>
           <div style={styles.vendorList}>
-            {vendedores.map((v) => (
+            {vendedoresFiltrados.length === 0 && vendedores.length > 0 && (
+              <div style={styles.noVendorWarn}>Ningún vendedor coincide con el filtro de isla/sede/marca seleccionado.</div>
+            )}
+            {vendedoresFiltrados.map((v) => (
               <VendedorRow
                 key={v.id}
                 vendedor={v}
@@ -2665,10 +2678,10 @@ export default function AgendaVendedores() {
           <div style={{ ...styles.vendorList, marginTop: 16 }}>
             {vacaciones.length === 0 ? (
               <div style={styles.panelHint}>Aún no hay vacaciones registradas.</div>
+            ) : vacacionesFiltradas.length === 0 ? (
+              <div style={styles.panelHint}>Ninguna vacación coincide con el filtro de isla/sede/marca seleccionado.</div>
             ) : (
-              [...vacaciones]
-                .sort((a, b) => (b.hasta || "").localeCompare(a.hasta || ""))
-                .map((vac) => {
+              vacacionesFiltradas.map((vac) => {
                   const v = vendedores.find((vv) => vv.id === vac.vendorId);
                   const hoyStr = new Date().toISOString().slice(0, 10);
                   const enCurso = vac.desde <= hoyStr && hoyStr <= vac.hasta;
@@ -2697,10 +2710,10 @@ export default function AgendaVendedores() {
         <div style={styles.panel}>
           <div style={styles.panelTitle}>Turnos rotativos de la semana</div>
           <div style={styles.panelHint}>
-            Escribe el horario de cada vendedor como texto, por ejemplo <strong>9:00-13:30, 16:30-20:00</strong>. El de lunes a viernes se aplica a los 5 días de golpe; el sábado es independiente. Deja el campo vacío para marcar que no trabaja ese día.
+            Escribe el horario de cada vendedor como texto, por ejemplo <strong>9:00-13:30, 16:30-20:00</strong>. El de lunes a viernes se aplica a los 5 días de golpe; el sábado es independiente. Deja el campo vacío para marcar que no trabaja ese día. Se muestran los vendedores según el filtro de Isla/Sede/Marca activo en la cabecera de arriba.
           </div>
           {vendedoresFiltrados.length === 0 && (
-            <div style={styles.noVendorWarn}>Ningún vendedor coincide con el filtro de isla/sede seleccionado.</div>
+            <div style={styles.noVendorWarn}>Ningún vendedor coincide con el filtro de isla/sede/marca seleccionado.</div>
           )}
           {vendedoresFiltrados.map((v) => (
             <VendedorTurnoTexto

@@ -284,7 +284,20 @@ function mesAnioDesdeExcel(anioVal, mesVal) {
 }
 
 function horaLabel(h) {
-  return `${String(Math.floor(h)).padStart(2, "0")}:${h % 1 === 0 ? "00" : "30"}`;
+  const horas = Math.floor(h);
+  const minutos = Math.round((h - horas) * 60);
+  return `${String(horas).padStart(2, "0")}:${String(minutos).padStart(2, "0")}`;
+}
+
+// Convierte un texto "HH:MM" (como el que devuelve un <input type="time">) a horas en formato
+// decimal (ej. "09:15" -> 9.25). Devuelve null si el texto no tiene ese formato.
+function horaTextoADecimalSimple(texto) {
+  const m = String(texto || "").trim().match(/^(\d{1,2}):(\d{2})$/);
+  if (!m) return null;
+  const h = Number(m[1]);
+  const min = Number(m[2]);
+  if (min < 0 || min > 59) return null;
+  return h + min / 60;
 }
 
 function slotsDia() {
@@ -1446,9 +1459,9 @@ export default function AgendaVendedores() {
   );
 
   const handleSaveCita = useCallback(
-    async (vendorId, dayIdx, hour, cliente, telefono, idExistente, gestorId, marca) => {
+    async (vendorId, dayIdx, hour, cliente, telefono, idExistente, gestorId, marca, horaExacta) => {
       if (idExistente) {
-        await updateCita(idExistente, { vendorId, day: dayIdx, hour, cliente: cliente || "", telefono: telefono || "", gestorId: gestorId || "", marca: marca || "" });
+        await updateCita(idExistente, { vendorId, day: dayIdx, hour, horaExacta, cliente: cliente || "", telefono: telefono || "", gestorId: gestorId || "", marca: marca || "" });
         showToast("Cita actualizada");
       } else {
         await addCita({
@@ -1456,6 +1469,7 @@ export default function AgendaVendedores() {
           vendorId,
           day: dayIdx,
           hour,
+          horaExacta,
           cliente: cliente || "",
           telefono: telefono || "",
           gestorId: gestorId || "",
@@ -3455,6 +3469,9 @@ export default function AgendaVendedores() {
                         const vendida = citasConVenta.has(c.id);
                         const noAsistio = c.asistio === false;
                         const fueraDeFiltro = !vendedoresFiltrados.some((vf) => vf.id === v.id);
+                        // La hora exacta solo se muestra si es distinta a la hora en punto de la
+                        // franja (que ya se ve en la columna de la izquierda), para no repetir.
+                        const horaExactaLabel = c.horaExacta != null && c.horaExacta !== h ? horaLabel(c.horaExacta) : null;
                         return (
                           <button
                             key={c.id}
@@ -3466,12 +3483,15 @@ export default function AgendaVendedores() {
                               color: colorV.text,
                               opacity: fueraDeFiltro ? 0.4 : noAsistio ? 0.6 : 1,
                             }}
-                            title={`${v.nombre}${c.cliente ? " · " + c.cliente : ""}${c.telefono ? " · " + c.telefono : ""}${g ? " · Gestor: " + g.nombre : ""}${c.marca ? " · " + c.marca : ""}${noAsistio ? " · No asistió" : c.asistio === true ? " · Asistió" : ""}`}
+                            title={`${horaExactaLabel ? horaExactaLabel + " · " : ""}${v.nombre}${c.cliente ? " · " + c.cliente : ""}${c.telefono ? " · " + c.telefono : ""}${g ? " · Gestor: " + g.nombre : ""}${c.marca ? " · " + c.marca : ""}${noAsistio ? " · No asistió" : c.asistio === true ? " · Asistió" : ""}`}
                           >
                             <span style={{ ...styles.citaDot, background: colorV.border }} />
                             {c.marca && <span style={{ ...styles.citaDot, background: colorParaMarca(c.marca).border }} />}
                             <span style={styles.citaChipTextWrap}>
-                              <span style={styles.citaChipText}>{v.nombre.split(" ")[0]}{c.cliente ? ` · ${c.cliente}` : ""}</span>
+                              <span style={styles.citaChipText}>
+                                {horaExactaLabel && <strong>{horaExactaLabel} </strong>}
+                                {v.nombre.split(" ")[0]}{c.cliente ? ` · ${c.cliente}` : ""}
+                              </span>
                               {g && <span style={styles.citaChipGestor}>Gestor: {g.nombre}</span>}
                               {noAsistio && <span style={styles.citaChipNoAsistio}>No asistió</span>}
                             </span>
@@ -4070,6 +4090,13 @@ function CitaModal({ modalCita, vendedores, gestores, vendoresDisponibles, suger
   const [cliente, setCliente] = useState(isEdit ? existing.cliente : "");
   const [telefono, setTelefono] = useState(isEdit ? existing.telefono || "" : "");
   const [marca, setMarca] = useState(isEdit ? existing.marca || "" : "");
+  // Hora exacta dentro de la franja de 30 min (ej. 9:15 dentro del bloque 9:00-9:30). Por
+  // defecto es la hora en punto de la franja, pero se puede afinar. La franja (hour) sigue
+  // siendo la que determina la fila de la rejilla y la comprobación de disponibilidad/turno.
+  const [horaExactaTexto, setHoraExactaTexto] = useState(
+    horaLabel(isEdit && existing.horaExacta != null ? existing.horaExacta : hour)
+  );
+  const [errorHoraExacta, setErrorHoraExacta] = useState(null);
 
   const vendorActual = vendedores.find((v) => v.id === vendorId);
   const matches = telefono ? ventasParaTelefono(telefono) : [];
@@ -4127,11 +4154,26 @@ function CitaModal({ modalCita, vendedores, gestores, vendoresDisponibles, suger
             <div style={styles.modalTitle}>
               {isEdit ? (cancelada ? "Cita cancelada" : "Editar cita") : "Nueva cita"}
             </div>
-            <div style={styles.modalSub}>{dias[day]} · {horaLabel(hour)}</div>
+            <div style={styles.modalSub}>{dias[day]} · franja {horaLabel(hour)}-{horaLabel(hour + 0.5)}</div>
           </div>
           <button onClick={onClose} style={styles.iconBtn} aria-label="Cerrar">
             <X size={18} />
           </button>
+        </div>
+
+        <div style={styles.modalField}>
+          <label style={styles.modalLabel}>Hora exacta</label>
+          <input
+            type="time"
+            step={300}
+            value={horaExactaTexto}
+            onChange={(e) => {
+              setHoraExactaTexto(e.target.value);
+              setErrorHoraExacta(null);
+            }}
+            style={{ ...styles.input, ...(errorHoraExacta ? styles.inputError : {}), maxWidth: 140 }}
+          />
+          {errorHoraExacta && <div style={styles.turnoTextoError}>{errorHoraExacta}</div>}
         </div>
 
         {cancelada && (
@@ -4290,7 +4332,18 @@ function CitaModal({ modalCita, vendedores, gestores, vendoresDisponibles, suger
           <button onClick={onClose} style={styles.secondaryBtn}>Cerrar</button>
           <button
             disabled={!vendorActual}
-            onClick={() => onSave(vendorId, day, hour, cliente, telefono, isEdit ? existing.id : null, gestorId, marca)}
+            onClick={() => {
+              const horaExactaDecimal = horaTextoADecimalSimple(horaExactaTexto);
+              if (horaExactaDecimal === null) {
+                setErrorHoraExacta("Escribe una hora válida (HH:MM).");
+                return;
+              }
+              if (horaExactaDecimal < hour || horaExactaDecimal >= hour + 0.5) {
+                setErrorHoraExacta(`La hora debe estar entre ${horaLabel(hour)} y ${horaLabel(hour + 0.5)} (la franja de esta cita). Para otra franja, ciérrala y pulsa "+" en la casilla correcta.`);
+                return;
+              }
+              onSave(vendorId, day, hour, cliente, telefono, isEdit ? existing.id : null, gestorId, marca, horaExactaDecimal);
+            }}
             style={{ ...styles.primaryBtn, opacity: vendorActual ? 1 : 0.5 }}
           >
             <Check size={15} /> {isEdit ? (cancelada ? "Reactivar y guardar" : "Guardar cambios") : "Asignar cita"}

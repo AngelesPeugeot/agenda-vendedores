@@ -361,6 +361,35 @@ function horasATexto(horas) {
   return tramos.join(", ");
 }
 
+// Plantillas de horario de lunes a viernes más habituales en el equipo, para poder elegir un
+// horario completo de un clic (en vez de escribirlo a mano) al definir el horario habitual o
+// una excepción puntual de un vendedor. Cada plantilla ya trae sus horas de slot calculadas.
+const PLANTILLAS_HORARIO_LV = [
+  "9:00-17:00",
+  "10:00-18:00",
+  "9:00-13:00, 15:00-19:00",
+  "10:00-14:00, 17:00-20:00",
+  "9:00-12:00, 15:00-19:00",
+  "11:00-15:00, 17:00-20:00",
+  "9:00-13:30, 16:30-20:00",
+].map((texto) => ({ id: texto, texto, horas: parseHorarioTexto(texto) }));
+
+// El sábado siempre es el mismo horario cuando se trabaja: 10:00-13:00. Por eso no hace falta
+// texto libre, solo un interruptor de "trabaja / no trabaja" ese día.
+const HORAS_SABADO_ESTANDAR = parseHorarioTexto("10:00-13:00");
+
+// Dado un array de horas de slot, busca si coincide EXACTAMENTE con alguna plantilla conocida
+// (mismo conjunto de horas, sin importar el orden). Devuelve el id de la plantilla o null si no
+// coincide con ninguna (caso "personalizado").
+function plantillaQueCoincide(horas, listaPlantillas = PLANTILLAS_HORARIO_LV) {
+  if (!horas || horas.length === 0) return "";
+  const setHoras = new Set(horas);
+  const encontrada = listaPlantillas.find(
+    (p) => p.horas.length === setHoras.size && p.horas.every((h) => setHoras.has(h))
+  );
+  return encontrada ? encontrada.id : "personalizado";
+}
+
 function getMonday(d) {
   const date = new Date(d);
   const day = date.getDay();
@@ -403,6 +432,7 @@ function fechaDeCitaSemana(weekKey, day) {
 //   leadsSinCita/{id}            -> {cliente, telefono, gestorId, vendorId, isla, sede, creadoEn}
 //   vacaciones/{id}               -> {vendorId, desde, hasta, origen}  (desde/hasta en formato YYYY-MM-DD)
 //   horariosHabituales/{vendorId} -> {horasLV: [...], horasSabado: [...]}  (base recurrente, no por semana)
+//   plantillasHorarioPersonalizadas/{id} -> {texto}  (plantillas de horario L-V añadidas por el equipo)
 //   turnos/{weekKey}_{vendorId} -> {weekKey, vendorId, dias: {0:[...],...}}
 //   citas/{id}                  -> {weekKey, vendorId, gestorId, day, hour, cliente, telefono}
 //   ventas/historico             -> {fileName, uploadedAt, records}  (se sube una vez, KPIs anuales)
@@ -597,6 +627,51 @@ function useHorariosHabitualesSync() {
   }, []);
 
   return { horariosHabituales, loadingHorariosHabituales, setHorarioHabitual };
+}
+
+// Plantillas de horario personalizadas, añadidas por el equipo además de las 7 predefinidas de
+// fábrica. Se guardan compartidas (no por vendedor), para que cualquiera pueda elegirlas al
+// definir un horario habitual o una excepción semanal.
+function usePlantillasPersonalizadasSync() {
+  const [plantillasPersonalizadas, setPlantillasPersonalizadas] = useState([]);
+  const [loadingPlantillas, setLoadingPlantillas] = useState(true);
+
+  useEffect(() => {
+    if (!firebaseDisponible) {
+      setLoadingPlantillas(false);
+      return;
+    }
+    const refPlantillas = ref(db, "plantillasHorarioPersonalizadas");
+    const unsub = onValue(refPlantillas, (snap) => {
+      const data = snap.val() || {};
+      const list = Object.entries(data).map(([id, p]) => ({ id, ...p }));
+      setPlantillasPersonalizadas(list);
+      setLoadingPlantillas(false);
+    }, (err) => {
+      console.error("Error sincronizando plantillas de horario", err);
+      setLoadingPlantillas(false);
+    });
+    return () => unsub();
+  }, []);
+
+  const addPlantillaPersonalizada = useCallback(async (plantilla) => {
+    if (!firebaseDisponible) {
+      setPlantillasPersonalizadas((prev) => [...prev, plantilla]);
+      return;
+    }
+    const { id, ...resto } = plantilla;
+    await set(ref(db, `plantillasHorarioPersonalizadas/${id}`), resto);
+  }, []);
+
+  const removePlantillaPersonalizada = useCallback(async (id) => {
+    if (!firebaseDisponible) {
+      setPlantillasPersonalizadas((prev) => prev.filter((p) => p.id !== id));
+      return;
+    }
+    await remove(ref(db, `plantillasHorarioPersonalizadas/${id}`));
+  }, []);
+
+  return { plantillasPersonalizadas, loadingPlantillas, addPlantillaPersonalizada, removePlantillaPersonalizada };
 }
 
 // Leads sin cita: clientes que reciben presupuesto o se derivan directamente a un vendedor
@@ -817,6 +892,21 @@ export default function AgendaVendedores() {
   const { gestores, loadingGestores, addGestor, removeGestor } = useGestoresSync();
   const { vacaciones, addVacacion, addVacacionesEnLote, removeVacacion } = useVacacionesSync();
   const { horariosHabituales, setHorarioHabitual } = useHorariosHabitualesSync();
+  const { plantillasPersonalizadas, addPlantillaPersonalizada, removePlantillaPersonalizada } = usePlantillasPersonalizadasSync();
+
+  // Combina las 7 plantillas de fábrica con las que el equipo haya añadido, para el desplegable
+  // de horario de lunes a viernes. Las personalizadas se marcan para poder distinguirlas y
+  // permitir borrarlas (las de fábrica no se pueden borrar).
+  const plantillasHorarioCombinadas = useMemo(() => {
+    const personalizadas = plantillasPersonalizadas.map((p) => ({
+      id: p.id,
+      texto: p.texto,
+      horas: parseHorarioTexto(p.texto),
+      esPersonalizada: true,
+    }));
+    return [...PLANTILLAS_HORARIO_LV, ...personalizadas];
+  }, [plantillasPersonalizadas]);
+
   const { leadsSinCita, addLeadSinCita, addLeadsSinCitaEnLote, updateLeadSinCita, removeLeadSinCita } = useLeadsSinCitaSync();
   const { turnos, setTurnoVendorDia } = useTurnosSync(weekKey);
   const { citas, addCita, updateCita, removeCita } = useCitasSync(weekKey);
@@ -824,7 +914,24 @@ export default function AgendaVendedores() {
   const { ventas: ventasHistorico, guardarVentas: guardarVentasHistorico } = useVentasSync("historico");
   const { ventas: ventasCotejo, guardarVentas: guardarVentasCotejo } = useVentasSync("cotejo");
 
+  // ---------- Vista mensual (resumen por día, no detalle hora a hora) ----------
+  const [mesReferencia, setMesReferencia] = useState(() => {
+    const hoy = new Date();
+    return new Date(hoy.getFullYear(), hoy.getMonth(), 1);
+  });
+  const irMesAnterior = useCallback(() => {
+    setMesReferencia((prev) => new Date(prev.getFullYear(), prev.getMonth() - 1, 1));
+  }, []);
+  const irMesSiguiente = useCallback(() => {
+    setMesReferencia((prev) => new Date(prev.getFullYear(), prev.getMonth() + 1, 1));
+  }, []);
+  const irMesActual = useCallback(() => {
+    const hoy = new Date();
+    setMesReferencia(new Date(hoy.getFullYear(), hoy.getMonth(), 1));
+  }, []);
+
   const [vista, setVista] = useState("agenda");
+  const [modoAgendaVista, setModoAgendaVista] = useState("semana");
   const [gestionMenuAbierto, setGestionMenuAbierto] = useState(false);
   const gestionMenuRef = useRef(null);
   useEffect(() => {
@@ -895,6 +1002,38 @@ export default function AgendaVendedores() {
     setToast(msg);
     setTimeout(() => setToast(null), 2200);
   }, []);
+
+  const [nuevaPlantillaTexto, setNuevaPlantillaTexto] = useState("");
+  const [errorNuevaPlantilla, setErrorNuevaPlantilla] = useState(null);
+
+  const handleAddPlantilla = useCallback(async () => {
+    const texto = nuevaPlantillaTexto.trim();
+    if (!texto) return;
+    try {
+      parseHorarioTexto(texto); // valida el formato antes de guardar; lanza Error si no es válido
+      const yaExiste = plantillasHorarioCombinadas.some(
+        (p) => p.texto.toLowerCase() === texto.toLowerCase()
+      );
+      if (yaExiste) {
+        setErrorNuevaPlantilla("Ya existe una plantilla con ese mismo horario.");
+        return;
+      }
+      await addPlantillaPersonalizada({ id: genId(), texto });
+      setNuevaPlantillaTexto("");
+      setErrorNuevaPlantilla(null);
+      showToast("Plantilla añadida");
+    } catch (e) {
+      setErrorNuevaPlantilla(e.message);
+    }
+  }, [nuevaPlantillaTexto, plantillasHorarioCombinadas, addPlantillaPersonalizada, showToast]);
+
+  const handleRemovePlantilla = useCallback(
+    async (id) => {
+      await removePlantillaPersonalizada(id);
+      showToast("Plantilla eliminada");
+    },
+    [removePlantillaPersonalizada, showToast]
+  );
 
   // ---------- Vendedores ----------
   const handleAddVendedor = useCallback(async () => {
@@ -1195,6 +1334,46 @@ export default function AgendaVendedores() {
     [vacaciones]
   );
 
+  // Celdas del calendario mensual: lunes como primer día de la semana, con relleno de celdas
+  // vacías al principio y al final para completar semanas de 7 días.
+  const diasDelMes = useMemo(() => {
+    const anio = mesReferencia.getFullYear();
+    const mes = mesReferencia.getMonth();
+    const primerDiaMes = new Date(anio, mes, 1);
+    const diaSemanaPrimer = (primerDiaMes.getDay() + 6) % 7; // convierte domingo=0 a lunes=0
+    const diasEnMes = new Date(anio, mes + 1, 0).getDate();
+    const celdas = [];
+    for (let i = 0; i < diaSemanaPrimer; i++) celdas.push(null);
+    for (let d = 1; d <= diasEnMes; d++) celdas.push(new Date(anio, mes, d));
+    while (celdas.length % 7 !== 0) celdas.push(null);
+    return celdas;
+  }, [mesReferencia]);
+
+  // Número de citas activas por día (formato "YYYY-MM-DD"), para el resumen del mes.
+  const citasPorDiaDelMes = useMemo(() => {
+    const map = {};
+    todasLasCitas.forEach((c) => {
+      if (c.estado === "cancelada") return;
+      const fecha = fechaDeCitaSemana(c.weekKey, c.day);
+      if (!fecha) return;
+      const key = fecha.toISOString().slice(0, 10);
+      map[key] = (map[key] || 0) + 1;
+    });
+    return map;
+  }, [todasLasCitas]);
+
+  // Vendedores (según el filtro activo) de vacaciones cada día del mes que se está viendo.
+  const vacacionesPorDiaDelMes = useMemo(() => {
+    const map = {};
+    diasDelMes.forEach((fecha) => {
+      if (!fecha) return;
+      const key = fecha.toISOString().slice(0, 10);
+      const enVacaciones = vendedoresFiltrados.filter((v) => estaDeVacaciones(v.id, fecha));
+      if (enVacaciones.length > 0) map[key] = enVacaciones.length;
+    });
+    return map;
+  }, [diasDelMes, vendedoresFiltrados, estaDeVacaciones]);
+
   const setBulkTurno = useCallback(
     async (vendorId, dayIdx, tramo) => {
       const actual = { ...(turnos[vendorId] || {}) };
@@ -1217,6 +1396,19 @@ export default function AgendaVendedores() {
   const aplicarHorarioTexto = useCallback(
     async (vendorId, diasIdx, texto) => {
       const horas = parseHorarioTexto(texto); // puede lanzar Error, se propaga al caller
+      const actual = { ...(turnos[vendorId] || {}) };
+      diasIdx.forEach((dayIdx) => {
+        actual[dayIdx] = horas;
+      });
+      await setTurnoVendorDia(vendorId, actual);
+    },
+    [turnos, setTurnoVendorDia]
+  );
+
+  // Igual que aplicarHorarioTexto, pero con las horas ya calculadas (al elegir una plantilla de
+  // un clic, no hace falta parsear texto).
+  const aplicarHorarioDirecto = useCallback(
+    async (vendorId, diasIdx, horas) => {
       const actual = { ...(turnos[vendorId] || {}) };
       diasIdx.forEach((dayIdx) => {
         actual[dayIdx] = horas;
@@ -2309,6 +2501,23 @@ export default function AgendaVendedores() {
             Hoy
           </button>
 
+          {vista === "agenda" && (
+            <div style={styles.informeOrdenToggle}>
+              <button
+                onClick={() => setModoAgendaVista("semana")}
+                style={modoAgendaVista === "semana" ? styles.informeOrdenBtnActive : styles.informeOrdenBtn}
+              >
+                Semana
+              </button>
+              <button
+                onClick={() => setModoAgendaVista("mes")}
+                style={modoAgendaVista === "mes" ? styles.informeOrdenBtnActive : styles.informeOrdenBtn}
+              >
+                Mes
+              </button>
+            </div>
+          )}
+
           <div style={{ flex: 1 }} />
 
           {vendedores.length > 0 && (
@@ -2815,6 +3024,43 @@ export default function AgendaVendedores() {
 
       {vendedores.length > 0 && vista === "turnos" && (
         <div style={styles.panel}>
+          <div style={styles.panelTitle}>Plantillas de horario (lunes a viernes)</div>
+          <div style={styles.panelHint}>
+            Los patrones disponibles en los desplegables de abajo. Añade uno nuevo aquí si hace falta un horario que no esté en la lista — quedará disponible para elegir en cualquier vendedor.
+          </div>
+          <div style={styles.leadFormGrid}>
+            <input
+              value={nuevaPlantillaTexto}
+              onChange={(e) => {
+                setNuevaPlantillaTexto(e.target.value);
+                setErrorNuevaPlantilla(null);
+              }}
+              onKeyDown={(e) => e.key === "Enter" && handleAddPlantilla()}
+              placeholder="ej. 8:00-12:00, 16:00-19:00"
+              style={{ ...styles.input, ...(errorNuevaPlantilla ? styles.inputError : {}) }}
+            />
+            <button onClick={handleAddPlantilla} style={styles.primaryBtn}>
+              <Plus size={16} /> Añadir plantilla
+            </button>
+          </div>
+          {errorNuevaPlantilla && <div style={styles.turnoTextoError}>{errorNuevaPlantilla}</div>}
+          <div style={styles.plantillasListaWrap}>
+            {plantillasHorarioCombinadas.map((p) => (
+              <div key={p.id} style={styles.plantillaChip}>
+                {p.texto}
+                {p.esPersonalizada && (
+                  <button onClick={() => handleRemovePlantilla(p.id)} style={styles.plantillaChipBorrar} aria-label={`Eliminar plantilla ${p.texto}`}>
+                    <X size={11} />
+                  </button>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {vendedores.length > 0 && vista === "turnos" && (
+        <div style={styles.panel}>
           <div style={styles.panelTitle}>Horario habitual</div>
           <div style={styles.panelHint}>
             El horario que cada vendedor repite casi todas las semanas. Se aplica automáticamente cada semana sin que tengas que hacer nada — solo entra en "Turnos de esta semana" (más abajo) si alguien tiene una excepción puntual esa semana en concreto.
@@ -2827,6 +3073,7 @@ export default function AgendaVendedores() {
               key={v.id}
               vendedor={v}
               horarioHabitual={horariosHabituales[v.id]}
+              plantillas={plantillasHorarioCombinadas}
               onGuardar={setHorarioHabitual}
               showToast={showToast}
             />
@@ -2854,7 +3101,9 @@ export default function AgendaVendedores() {
               vendedor={v}
               turnos={turnos[v.id] || {}}
               horarioHabitual={horariosHabituales[v.id]}
+              plantillas={plantillasHorarioCombinadas}
               onAplicar={aplicarHorarioTexto}
+              onAplicarDirecto={aplicarHorarioDirecto}
               onQuitarExcepcion={quitarExcepcionSemana}
               onCopiarSemanaAnterior={handleCopiarSemanaAnteriorVendedor}
               showToast={showToast}
@@ -3306,7 +3555,7 @@ export default function AgendaVendedores() {
         </div>
       )}
 
-      {vendedores.length > 0 && vista === "agenda" && (
+      {vendedores.length > 0 && vista === "agenda" && modoAgendaVista === "semana" && (
         <div style={styles.panel}>
           <div style={styles.agendaGrid}>
             <div style={styles.agendaCorner}>Hora</div>
@@ -3402,6 +3651,61 @@ export default function AgendaVendedores() {
                 );
               })
             )}
+          </div>
+        </div>
+      )}
+
+      {vendedores.length > 0 && vista === "agenda" && modoAgendaVista === "mes" && (
+        <div style={styles.panel}>
+          <div style={styles.mesNavRow}>
+            <button onClick={irMesAnterior} style={styles.navBtn} aria-label="Mes anterior">
+              <ChevronLeft size={18} />
+            </button>
+            <div style={styles.weekLabel}>
+              {mesReferencia.toLocaleDateString("es-ES", { month: "long", year: "numeric" })}
+            </div>
+            <button onClick={irMesSiguiente} style={styles.navBtn} aria-label="Mes siguiente">
+              <ChevronRight size={18} />
+            </button>
+            <button onClick={irMesActual} style={styles.todayBtn}>Este mes</button>
+          </div>
+
+          <div style={styles.mesGrid}>
+            {DIAS_CORTO.concat(["DOM"]).map((d) => (
+              <div key={d} style={styles.mesDiaSemanaHeader}>{d}</div>
+            ))}
+            {diasDelMes.map((fecha, i) => {
+              if (!fecha) return <div key={i} style={styles.mesCeldaVacia} />;
+              const key = fecha.toISOString().slice(0, 10);
+              const numCitas = citasPorDiaDelMes[key] || 0;
+              const numVacaciones = vacacionesPorDiaDelMes[key] || 0;
+              const esHoy = key === fmtWeekKey(new Date());
+              const esDomingo = fecha.getDay() === 0;
+              return (
+                <button
+                  key={i}
+                  onClick={() => {
+                    setWeekStart(getMonday(fecha));
+                    setModoAgendaVista("semana");
+                  }}
+                  style={{
+                    ...styles.mesCelda,
+                    ...(esHoy ? styles.mesCeldaHoy : {}),
+                    ...(esDomingo ? styles.mesCeldaDomingo : {}),
+                  }}
+                >
+                  <span style={styles.mesCeldaNumero}>{fecha.getDate()}</span>
+                  {numCitas > 0 && (
+                    <span style={styles.mesCeldaCitas}>
+                      <Calendar size={10} /> {numCitas}
+                    </span>
+                  )}
+                  {numVacaciones > 0 && (
+                    <span style={styles.mesCeldaVacaciones}>{numVacaciones} de vacaciones</span>
+                  )}
+                </button>
+              );
+            })}
           </div>
         </div>
       )}
@@ -3643,7 +3947,96 @@ function InformeTabla({ titulo, filas, usarGrafico }) {
 // Si esta semana no tiene una excepción explícita guardada para un grupo de días (L-V o
 // Sábado), se muestra y aplica automáticamente el horario habitual de ese vendedor. Al escribir
 // y pulsar "Aplicar" se crea una excepción SOLO para esta semana, sin tocar el horario habitual.
-function VendedorTurnoTexto({ vendedor, turnos, horarioHabitual, onAplicar, onQuitarExcepcion, onCopiarSemanaAnterior, showToast }) {
+// ---------- Selector de horario de lunes a viernes: plantillas de un clic + opción personalizada ----------
+// onCambiar(horas) se llama inmediatamente al elegir una plantilla o "Sin turno". Para
+// "Personalizado" se muestra un campo de texto libre con su propio botón "Aplicar".
+function SelectorHorarioLV({ horasActuales, plantillas, onCambiar, onCambiarTexto, deshabilitado }) {
+  const listaPlantillas = plantillas || PLANTILLAS_HORARIO_LV;
+  const seleccion = plantillaQueCoincide(horasActuales, listaPlantillas);
+  const [textoPersonalizado, setTextoPersonalizado] = useState(seleccion === "personalizado" ? horasATexto(horasActuales) : "");
+  const [errorPersonalizado, setErrorPersonalizado] = useState(null);
+
+  const guardarPersonalizado = useCallback(async () => {
+    try {
+      await onCambiarTexto(textoPersonalizado);
+      setErrorPersonalizado(null);
+    } catch (e) {
+      setErrorPersonalizado(e.message);
+    }
+  }, [onCambiarTexto, textoPersonalizado]);
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 4, flex: 1, minWidth: 220 }}>
+      <select
+        value={seleccion}
+        disabled={deshabilitado}
+        onChange={(e) => {
+          const val = e.target.value;
+          if (val === "personalizado") {
+            setTextoPersonalizado(horasATexto(horasActuales));
+            return; // se queda esperando a que escriba y pulse Aplicar
+          }
+          if (val === "") {
+            onCambiar([]);
+            return;
+          }
+          const plantilla = listaPlantillas.find((p) => p.id === val);
+          if (plantilla) onCambiar(plantilla.horas);
+        }}
+        style={styles.select}
+      >
+        <option value="">Sin turno (no trabaja)</option>
+        {listaPlantillas.map((p) => (
+          <option key={p.id} value={p.id}>{p.texto}</option>
+        ))}
+        <option value="personalizado">Personalizado…</option>
+      </select>
+      {seleccion === "personalizado" && (
+        <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+          <input
+            value={textoPersonalizado}
+            onChange={(e) => {
+              setTextoPersonalizado(e.target.value);
+              setErrorPersonalizado(null);
+            }}
+            onKeyDown={(e) => e.key === "Enter" && guardarPersonalizado()}
+            placeholder="ej. 9:00-13:30, 16:30-20:00"
+            style={{ ...styles.input, ...(errorPersonalizado ? styles.inputError : {}) }}
+          />
+          <button onClick={guardarPersonalizado} style={styles.secondaryBtnSmall}>
+            <Check size={12} /> Aplicar
+          </button>
+        </div>
+      )}
+      {errorPersonalizado && <div style={styles.turnoTextoError}>{errorPersonalizado}</div>}
+    </div>
+  );
+}
+
+// ---------- Toggle simple para el sábado: trabaja (10:00-13:00) o no trabaja ----------
+function SelectorSabado({ horasActuales, onCambiar, deshabilitado }) {
+  const trabaja = (horasActuales || []).length > 0;
+  return (
+    <div style={styles.informeOrdenToggle}>
+      <button
+        onClick={() => onCambiar([])}
+        disabled={deshabilitado}
+        style={!trabaja ? styles.informeOrdenBtnActive : styles.informeOrdenBtn}
+      >
+        No trabaja
+      </button>
+      <button
+        onClick={() => onCambiar(HORAS_SABADO_ESTANDAR)}
+        disabled={deshabilitado}
+        style={trabaja ? styles.asistioBtnActive : styles.informeOrdenBtn}
+      >
+        10:00-13:00
+      </button>
+    </div>
+  );
+}
+
+function VendedorTurnoTexto({ vendedor, turnos, horarioHabitual, plantillas, onAplicar, onAplicarDirecto, onQuitarExcepcion, onCopiarSemanaAnterior, showToast }) {
   const c = colorParaSede(vendedor.isla, vendedor.sede);
 
   // Días de lunes a viernes son los índices 0-4; sábado es el índice 5.
@@ -3658,62 +4051,37 @@ function VendedorTurnoTexto({ vendedor, turnos, horarioHabitual, onAplicar, onQu
   const horasEfectivasLV = excepcionLV ? (turnos[0] || []) : (horarioHabitual?.horasLV || []);
   const horasEfectivasSabado = excepcionSabado ? (turnos[5] || []) : (horarioHabitual?.horasSabado || []);
 
-  // Si los 5 días de lunes a viernes ya tienen exactamente el mismo horario guardado, lo
-  // mostramos como punto de partida. Si hay alguna diferencia entre ellos (por ejemplo datos
-  // antiguos con horarios distintos por día), dejamos el campo vacío en vez de mostrar uno
-  // cualquiera, para no dar una falsa sensación de que todos coinciden.
-  const horariosLV = diasLV.map((d) => JSON.stringify((turnos[d] || []).slice().sort((a, b) => a - b)));
-  const todosIguales = !excepcionLV || horariosLV.every((h) => h === horariosLV[0]);
-  const textoInicialLV = todosIguales ? horasATexto(horasEfectivasLV) : "";
-  const textoInicialSabado = horasATexto(horasEfectivasSabado);
-
-  const [textoLV, setTextoLV] = useState(textoInicialLV);
-  const [textoSabado, setTextoSabado] = useState(textoInicialSabado);
-  const [errorLV, setErrorLV] = useState(null);
-  const [errorSabado, setErrorSabado] = useState(null);
-
-  // Si los turnos cambian desde fuera (otro dispositivo editando a la vez), refrescamos el
-  // valor mostrado, pero solo si el usuario no está con cambios sin guardar en ese campo.
-  const [tocadoLV, setTocadoLV] = useState(false);
-  const [tocadoSabado, setTocadoSabado] = useState(false);
-  useEffect(() => {
-    if (!tocadoLV) setTextoLV(textoInicialLV);
-  }, [textoInicialLV, tocadoLV]);
-  useEffect(() => {
-    if (!tocadoSabado) setTextoSabado(textoInicialSabado);
-  }, [textoInicialSabado, tocadoSabado]);
-
-  const guardarLV = useCallback(async () => {
-    try {
-      await onAplicar(vendedor.id, diasLV, textoLV);
-      setErrorLV(null);
-      setTocadoLV(false);
+  const cambiarLV = useCallback(
+    async (horas) => {
+      await onAplicarDirecto(vendedor.id, diasLV, horas);
       showToast(`Excepción de esta semana guardada para ${vendedor.nombre}`);
-    } catch (e) {
-      setErrorLV(e.message);
-    }
-  }, [onAplicar, vendedor.id, vendedor.nombre, textoLV, showToast]);
+    },
+    [onAplicarDirecto, vendedor.id, vendedor.nombre, showToast]
+  );
 
-  const guardarSabado = useCallback(async () => {
-    try {
-      await onAplicar(vendedor.id, [diaSabado], textoSabado);
-      setErrorSabado(null);
-      setTocadoSabado(false);
+  const cambiarLVTexto = useCallback(
+    async (texto) => {
+      await onAplicar(vendedor.id, diasLV, texto); // puede lanzar Error, lo captura el selector
+      showToast(`Excepción de esta semana guardada para ${vendedor.nombre}`);
+    },
+    [onAplicar, vendedor.id, vendedor.nombre, showToast]
+  );
+
+  const cambiarSabado = useCallback(
+    async (horas) => {
+      await onAplicarDirecto(vendedor.id, [diaSabado], horas);
       showToast(`Excepción del sábado guardada para ${vendedor.nombre}`);
-    } catch (e) {
-      setErrorSabado(e.message);
-    }
-  }, [onAplicar, vendedor.id, vendedor.nombre, textoSabado, showToast]);
+    },
+    [onAplicarDirecto, vendedor.id, vendedor.nombre, showToast]
+  );
 
   const quitarLV = useCallback(async () => {
     await onQuitarExcepcion(vendedor.id, diasLV);
-    setTocadoLV(false);
     showToast(`${vendedor.nombre} vuelve a su horario habitual de lunes a viernes`);
   }, [onQuitarExcepcion, vendedor.id, vendedor.nombre, showToast]);
 
   const quitarSabado = useCallback(async () => {
     await onQuitarExcepcion(vendedor.id, [diaSabado]);
-    setTocadoSabado(false);
     showToast(`${vendedor.nombre} vuelve a su sábado habitual`);
   }, [onQuitarExcepcion, vendedor.id, vendedor.nombre, showToast]);
 
@@ -3729,20 +4097,7 @@ function VendedorTurnoTexto({ vendedor, turnos, horarioHabitual, onAplicar, onQu
       </div>
       <div style={styles.turnoTextoRow}>
         <label style={styles.turnoTextoLabel}>Lunes a viernes</label>
-        <input
-          value={textoLV}
-          onChange={(e) => {
-            setTextoLV(e.target.value);
-            setTocadoLV(true);
-            setErrorLV(null);
-          }}
-          onKeyDown={(e) => e.key === "Enter" && guardarLV()}
-          placeholder="ej. 9:00-13:30, 16:30-20:00"
-          style={{ ...styles.input, ...(errorLV ? styles.inputError : {}) }}
-        />
-        <button onClick={guardarLV} style={styles.secondaryBtnSmall}>
-          <Check size={12} /> Aplicar
-        </button>
+        <SelectorHorarioLV horasActuales={horasEfectivasLV} plantillas={plantillas} onCambiar={cambiarLV} onCambiarTexto={cambiarLVTexto} />
         {excepcionLV ? (
           <span style={styles.badgeExcepcion}>Excepción esta semana</span>
         ) : (
@@ -3754,27 +4109,10 @@ function VendedorTurnoTexto({ vendedor, turnos, horarioHabitual, onAplicar, onQu
           </button>
         )}
       </div>
-      {errorLV && <div style={styles.turnoTextoError}>{errorLV}</div>}
-      {excepcionLV && !todosIguales && !tocadoLV && (
-        <div style={styles.turnoTextoAviso}>Los días de esta semana tienen horarios distintos entre sí. Escribe uno para igualarlos todos.</div>
-      )}
 
       <div style={styles.turnoTextoRow}>
         <label style={styles.turnoTextoLabel}>Sábado</label>
-        <input
-          value={textoSabado}
-          onChange={(e) => {
-            setTextoSabado(e.target.value);
-            setTocadoSabado(true);
-            setErrorSabado(null);
-          }}
-          onKeyDown={(e) => e.key === "Enter" && guardarSabado()}
-          placeholder="ej. 10:00-13:00 (vacío si no trabaja)"
-          style={{ ...styles.input, ...(errorSabado ? styles.inputError : {}) }}
-        />
-        <button onClick={guardarSabado} style={styles.secondaryBtnSmall}>
-          <Check size={12} /> Aplicar
-        </button>
+        <SelectorSabado horasActuales={horasEfectivasSabado} onCambiar={cambiarSabado} />
         {excepcionSabado ? (
           <span style={styles.badgeExcepcion}>Excepción esta semana</span>
         ) : (
@@ -3786,55 +4124,37 @@ function VendedorTurnoTexto({ vendedor, turnos, horarioHabitual, onAplicar, onQu
           </button>
         )}
       </div>
-      {errorSabado && <div style={styles.turnoTextoError}>{errorSabado}</div>}
     </div>
   );
 }
 
 // ---------- Horario habitual por vendedor (base recurrente, independiente de la semana) ----------
-function VendedorHorarioHabitualTexto({ vendedor, horarioHabitual, onGuardar, showToast }) {
+function VendedorHorarioHabitualTexto({ vendedor, horarioHabitual, plantillas, onGuardar, showToast }) {
   const c = colorParaSede(vendedor.isla, vendedor.sede);
 
-  const textoInicialLV = horasATexto(horarioHabitual?.horasLV || []);
-  const textoInicialSabado = horasATexto(horarioHabitual?.horasSabado || []);
-
-  const [textoLV, setTextoLV] = useState(textoInicialLV);
-  const [textoSabado, setTextoSabado] = useState(textoInicialSabado);
-  const [errorLV, setErrorLV] = useState(null);
-  const [errorSabado, setErrorSabado] = useState(null);
-  const [tocadoLV, setTocadoLV] = useState(false);
-  const [tocadoSabado, setTocadoSabado] = useState(false);
-
-  useEffect(() => {
-    if (!tocadoLV) setTextoLV(textoInicialLV);
-  }, [textoInicialLV, tocadoLV]);
-  useEffect(() => {
-    if (!tocadoSabado) setTextoSabado(textoInicialSabado);
-  }, [textoInicialSabado, tocadoSabado]);
-
-  const guardarLV = useCallback(async () => {
-    try {
-      const horas = parseHorarioTexto(textoLV);
+  const cambiarLV = useCallback(
+    async (horas) => {
       await onGuardar(vendedor.id, { horasLV: horas });
-      setErrorLV(null);
-      setTocadoLV(false);
       showToast(`Horario habitual (L-V) actualizado para ${vendedor.nombre}`);
-    } catch (e) {
-      setErrorLV(e.message);
-    }
-  }, [onGuardar, vendedor.id, vendedor.nombre, textoLV, showToast]);
+    },
+    [onGuardar, vendedor.id, vendedor.nombre, showToast]
+  );
 
-  const guardarSabado = useCallback(async () => {
-    try {
-      const horas = parseHorarioTexto(textoSabado);
+  const cambiarLVTexto = useCallback(
+    async (texto) => {
+      const horas = parseHorarioTexto(texto); // puede lanzar Error, lo captura el selector
+      await cambiarLV(horas);
+    },
+    [cambiarLV]
+  );
+
+  const cambiarSabado = useCallback(
+    async (horas) => {
       await onGuardar(vendedor.id, { horasSabado: horas });
-      setErrorSabado(null);
-      setTocadoSabado(false);
-      showToast(`Horario habitual (sábado) actualizado para ${vendedor.nombre}`);
-    } catch (e) {
-      setErrorSabado(e.message);
-    }
-  }, [onGuardar, vendedor.id, vendedor.nombre, textoSabado, showToast]);
+      showToast(`Sábado habitual actualizado para ${vendedor.nombre}`);
+    },
+    [onGuardar, vendedor.id, vendedor.nombre, showToast]
+  );
 
   return (
     <div style={styles.turnoTextoBlock}>
@@ -3845,41 +4165,17 @@ function VendedorHorarioHabitualTexto({ vendedor, horarioHabitual, onGuardar, sh
       </div>
       <div style={styles.turnoTextoRow}>
         <label style={styles.turnoTextoLabel}>Lunes a viernes</label>
-        <input
-          value={textoLV}
-          onChange={(e) => {
-            setTextoLV(e.target.value);
-            setTocadoLV(true);
-            setErrorLV(null);
-          }}
-          onKeyDown={(e) => e.key === "Enter" && guardarLV()}
-          placeholder="ej. 9:00-13:30, 16:30-20:00"
-          style={{ ...styles.input, ...(errorLV ? styles.inputError : {}) }}
+        <SelectorHorarioLV
+          horasActuales={horarioHabitual?.horasLV || []}
+          plantillas={plantillas}
+          onCambiar={cambiarLV}
+          onCambiarTexto={cambiarLVTexto}
         />
-        <button onClick={guardarLV} style={styles.secondaryBtnSmall}>
-          <Check size={12} /> Guardar
-        </button>
       </div>
-      {errorLV && <div style={styles.turnoTextoError}>{errorLV}</div>}
-
       <div style={styles.turnoTextoRow}>
         <label style={styles.turnoTextoLabel}>Sábado</label>
-        <input
-          value={textoSabado}
-          onChange={(e) => {
-            setTextoSabado(e.target.value);
-            setTocadoSabado(true);
-            setErrorSabado(null);
-          }}
-          onKeyDown={(e) => e.key === "Enter" && guardarSabado()}
-          placeholder="ej. 10:00-13:00 (vacío si no trabaja normalmente)"
-          style={{ ...styles.input, ...(errorSabado ? styles.inputError : {}) }}
-        />
-        <button onClick={guardarSabado} style={styles.secondaryBtnSmall}>
-          <Check size={12} /> Guardar
-        </button>
+        <SelectorSabado horasActuales={horarioHabitual?.horasSabado || []} onCambiar={cambiarSabado} />
       </div>
-      {errorSabado && <div style={styles.turnoTextoError}>{errorSabado}</div>}
     </div>
   );
 }
@@ -4327,6 +4623,9 @@ const styles = {
   turnoTextoLabel: { fontSize: 12, fontWeight: 600, color: "#7A6B4C", width: 95, flexShrink: 0 },
   turnoTextoError: { fontSize: 11.5, color: "#A14B2C", marginTop: 4, marginLeft: 103 },
   turnoTextoAviso: { fontSize: 11.5, color: "#8A5E10", marginTop: 4, marginLeft: 103 },
+  plantillasListaWrap: { display: "flex", flexWrap: "wrap", gap: 6, marginTop: 12 },
+  plantillaChip: { display: "flex", alignItems: "center", gap: 6, border: "1px solid #E5E0D4", background: "#fff", color: "#5C5240", borderRadius: 999, padding: "5px 10px", fontSize: 12 },
+  plantillaChipBorrar: { display: "flex", border: "none", background: "transparent", color: "#A14B2C", padding: 0 },
   copiarSemanaBtn: { marginLeft: "auto", border: "1px solid #E5E0D4", background: "#fff", color: "#7A6B4C", fontSize: 11, fontWeight: 500, padding: "4px 9px", borderRadius: 7 },
   badgeHabitual: { fontSize: 10, fontWeight: 600, color: "#8A7B5C", background: "#F1EAD9", padding: "2px 8px", borderRadius: 999, whiteSpace: "nowrap" },
   badgeExcepcion: { fontSize: 10, fontWeight: 600, color: "#8A5E10", background: "#FBF1DE", padding: "2px 8px", borderRadius: 999, whiteSpace: "nowrap" },
@@ -4344,6 +4643,16 @@ const styles = {
   turnoCell: { height: 18, border: "1px solid #E5E0D4", borderRadius: 4, background: "transparent", display: "flex", alignItems: "center", justifyContent: "center", padding: 0 },
 
   agendaGrid: { display: "grid", gridTemplateColumns: "58px repeat(6, 1fr)", gap: 3 },
+  mesNavRow: { display: "flex", alignItems: "center", gap: 8, marginBottom: 16 },
+  mesGrid: { display: "grid", gridTemplateColumns: "repeat(7, 1fr)", gap: 4 },
+  mesDiaSemanaHeader: { fontSize: 11, fontWeight: 700, color: "#7A6B4C", textAlign: "center", paddingBottom: 6 },
+  mesCeldaVacia: { minHeight: 78, background: "transparent" },
+  mesCelda: { minHeight: 78, border: "1px solid #EFE9DA", borderRadius: 8, background: "#FFFEFB", padding: "6px 7px", display: "flex", flexDirection: "column", alignItems: "flex-start", gap: 4, textAlign: "left" },
+  mesCeldaHoy: { borderColor: "#C45A2E", borderWidth: 2 },
+  mesCeldaDomingo: { background: "#F7F3E8", opacity: 0.7 },
+  mesCeldaNumero: { fontSize: 13, fontWeight: 600, color: "#3D362A" },
+  mesCeldaCitas: { display: "flex", alignItems: "center", gap: 3, fontSize: 10.5, fontWeight: 600, color: "#2F5E3F", background: "#EAF2EC", padding: "2px 6px", borderRadius: 999 },
+  mesCeldaVacaciones: { fontSize: 9.5, color: "#8A5E10", background: "#FBF1DE", padding: "2px 6px", borderRadius: 999 },
   agendaCorner: { fontSize: 10.5, color: "#A89B7E", paddingBottom: 6 },
   agendaDayHeader: { textAlign: "center", paddingBottom: 8 },
   agendaDayName: { fontSize: 11, fontWeight: 700, color: "#7A6B4C" },

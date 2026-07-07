@@ -994,6 +994,7 @@ export default function AgendaVendedores() {
   const [leadAgruparPor, setLeadAgruparPor] = useState("mes");
   const [gruposLeadToggled, setGruposLeadToggled] = useState(() => new Set());
   const [formLeadAbierto, setFormLeadAbierto] = useState(false);
+  const [formVendedorAbierto, setFormVendedorAbierto] = useState(false);
 
   // Al cambiar el criterio de agrupación, se olvidan los plegados/desplegados manuales, para
   // que el estado por defecto (primer grupo abierto, resto plegado) vuelva a aplicarse limpio.
@@ -2508,59 +2509,74 @@ export default function AgendaVendedores() {
           <div style={styles.panelHint}>
             Se muestran los vendedores según el filtro de Isla/Sede/Marca activo en la cabecera de arriba.
           </div>
-          <div style={styles.addRow}>
-            <input
-              value={nuevoVendedorNombre}
-              onChange={(e) => setNuevoVendedorNombre(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && handleAddVendedor()}
-              placeholder="Nombre del vendedor"
-              style={styles.input}
-            />
-            <select
-              value={nuevoVendedorIsla}
-              onChange={(e) => {
-                const isla = e.target.value;
-                setNuevoVendedorIsla(isla);
-                setNuevoVendedorSede((ISLAS_SEDES[isla] || [])[0] || isla);
-              }}
-              style={styles.select}
-            >
-              {ISLAS.map((isla) => (
-                <option key={isla} value={isla}>{isla}</option>
-              ))}
-            </select>
-            {(ISLAS_SEDES[nuevoVendedorIsla] || []).length > 0 && (
-              <select
-                value={nuevoVendedorSede}
-                onChange={(e) => setNuevoVendedorSede(e.target.value)}
-                style={styles.select}
-              >
-                {ISLAS_SEDES[nuevoVendedorIsla].map((sede) => (
-                  <option key={sede} value={sede}>{sede}</option>
-                ))}
-              </select>
-            )}
-            <div style={styles.marcasCheckboxRow}>
-              {MARCAS.map((marca) => (
-                <label key={marca} style={styles.marcaCheckboxLabel}>
-                  <input
-                    type="checkbox"
-                    checked={nuevoVendedorMarcas.includes(marca)}
-                    onChange={() =>
-                      setNuevoVendedorMarcas((prev) =>
-                        prev.includes(marca) ? prev.filter((m) => m !== marca) : [...prev, marca]
-                      )
-                    }
-                    style={styles.filtroDesplegableCheckbox}
-                  />
-                  {marca}
-                </label>
-              ))}
-            </div>
-            <button onClick={handleAddVendedor} style={styles.primaryBtn}>
+
+          {!formVendedorAbierto ? (
+            <button onClick={() => setFormVendedorAbierto(true)} style={{ ...styles.primaryBtn, marginBottom: 18 }}>
               <Plus size={16} /> Añadir
             </button>
-          </div>
+          ) : (
+            <div style={styles.leadFormWrap}>
+              <div style={styles.leadFormGrid}>
+                <input
+                  value={nuevoVendedorNombre}
+                  onChange={(e) => setNuevoVendedorNombre(e.target.value)}
+                  onKeyDown={(e) => e.key === "Enter" && handleAddVendedor()}
+                  placeholder="Nombre del vendedor"
+                  style={styles.input}
+                />
+                <select
+                  value={nuevoVendedorIsla}
+                  onChange={(e) => {
+                    const isla = e.target.value;
+                    setNuevoVendedorIsla(isla);
+                    setNuevoVendedorSede((ISLAS_SEDES[isla] || [])[0] || isla);
+                  }}
+                  style={styles.select}
+                >
+                  {ISLAS.map((isla) => (
+                    <option key={isla} value={isla}>{isla}</option>
+                  ))}
+                </select>
+                {(ISLAS_SEDES[nuevoVendedorIsla] || []).length > 0 && (
+                  <select
+                    value={nuevoVendedorSede}
+                    onChange={(e) => setNuevoVendedorSede(e.target.value)}
+                    style={styles.select}
+                  >
+                    {ISLAS_SEDES[nuevoVendedorIsla].map((sede) => (
+                      <option key={sede} value={sede}>{sede}</option>
+                    ))}
+                  </select>
+                )}
+                <div style={styles.marcasCheckboxRow}>
+                  {MARCAS.map((marca) => (
+                    <label key={marca} style={styles.marcaCheckboxLabel}>
+                      <input
+                        type="checkbox"
+                        checked={nuevoVendedorMarcas.includes(marca)}
+                        onChange={() =>
+                          setNuevoVendedorMarcas((prev) =>
+                            prev.includes(marca) ? prev.filter((m) => m !== marca) : [...prev, marca]
+                          )
+                        }
+                        style={styles.filtroDesplegableCheckbox}
+                      />
+                      {marca}
+                    </label>
+                  ))}
+                </div>
+              </div>
+              <div style={styles.leadFormAcciones}>
+                <button onClick={() => setFormVendedorAbierto(false)} style={styles.secondaryBtnSmall}>
+                  Cerrar
+                </button>
+                <button onClick={handleAddVendedor} style={styles.primaryBtn}>
+                  <Plus size={16} /> Añadir
+                </button>
+              </div>
+            </div>
+          )}
+
           <div style={styles.vendorList}>
             {vendedoresFiltrados.length === 0 && vendedores.length > 0 && (
               <div style={styles.noVendorWarn}>Ningún vendedor coincide con el filtro de isla/sede/marca seleccionado.</div>

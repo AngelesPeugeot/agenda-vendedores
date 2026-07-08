@@ -4500,24 +4500,15 @@ function CitaModal({ modalCita, vendedores, gestores, vendoresDisponibles, suger
           {opcionesVendedor.length === 0 ? (
             <div style={styles.noVendorWarn}>Nadie tiene turno en este horario.</div>
           ) : (
-            <div style={styles.vendorPicker}>
-              {opcionesVendedor.map((v) => {
-                const c = colorParaSede(v.isla, v.sede);
-                return (
-                  <button
-                    key={v.id}
-                    onClick={() => setVendorId(v.id)}
-                    style={{
-                      ...styles.vendorOption,
-                      background: vendorId === v.id ? c.bg : "#fff",
-                      borderColor: vendorId === v.id ? c.border : "#E5E0D4",
-                    }}
-                  >
-                    <span style={{ ...styles.vendorDot, background: c.border }} />
-                    {v.nombre} <span style={styles.vendorOptionSede}>{v.sede}</span>
-                  </button>
-                );
-              })}
+            <div style={styles.vendorSelectRow}>
+              {vendorActual && (
+                <span style={{ ...styles.vendorDot, background: colorParaSede(vendorActual.isla, vendorActual.sede).border }} />
+              )}
+              <select value={vendorId} onChange={(e) => setVendorId(e.target.value)} style={{ ...styles.select, width: "100%" }}>
+                {opcionesVendedor.map((v) => (
+                  <option key={v.id} value={v.id}>{v.nombre} ({v.sede})</option>
+                ))}
+              </select>
             </div>
           )}
           {avisoSobrecarga && (
@@ -4535,24 +4526,14 @@ function CitaModal({ modalCita, vendedores, gestores, vendoresDisponibles, suger
           ) : marcasDelVendedor.length === 0 ? (
             <div style={styles.noVendorWarn}>{vendorActual.nombre} no tiene marcas configuradas. Puedes añadirlas en la pestaña "Vendedores".</div>
           ) : (
-            <div style={styles.vendorPicker}>
-              {marcasDelVendedor.map((m) => {
-                const mc = colorParaMarca(m);
-                return (
-                  <button
-                    key={m}
-                    onClick={() => setMarca(m)}
-                    style={{
-                      ...styles.vendorOption,
-                      background: marca === m ? mc.bg : "#fff",
-                      borderColor: marca === m ? mc.border : "#E5E0D4",
-                    }}
-                  >
-                    <span style={{ ...styles.vendorDot, background: mc.border }} />
-                    {m}
-                  </button>
-                );
-              })}
+            <div style={styles.vendorSelectRow}>
+              {marca && <span style={{ ...styles.vendorDot, background: colorParaMarca(marca).border }} />}
+              <select value={marca} onChange={(e) => setMarca(e.target.value)} style={{ ...styles.select, width: "100%" }}>
+                {marcasDelVendedor.length > 1 && <option value="">Elige una marca…</option>}
+                {marcasDelVendedor.map((m) => (
+                  <option key={m} value={m}>{m}</option>
+                ))}
+              </select>
             </div>
           )}
         </div>
@@ -4839,7 +4820,7 @@ const styles = {
   informeDetalleMes: { fontSize: 11, color: "#A89B7E", width: 80, flexShrink: 0 },
 
   modalOverlay: { position: "fixed", inset: 0, background: "rgba(43,38,32,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 50, padding: 16 },
-  modalCard: { background: "#FBF8F2", borderRadius: 14, padding: 22, width: 380, maxWidth: "100%", boxShadow: "0 12px 32px rgba(0,0,0,0.18)", border: "1px solid #EBE4D3" },
+  modalCard: { background: "#FBF8F2", borderRadius: 14, padding: 22, width: 380, maxWidth: "100%", maxHeight: "90vh", overflowY: "auto", boxShadow: "0 12px 32px rgba(0,0,0,0.18)", border: "1px solid #EBE4D3" },
   modalHeader: { display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 14 },
   modalTitle: { fontFamily: "var(--font-display)", fontSize: 17, fontWeight: 600 },
   modalSub: { fontSize: 12.5, color: "#8A7B5C", marginTop: 2 },
@@ -4852,9 +4833,7 @@ const styles = {
   modalField: { marginBottom: 14 },
   modalLabel: { display: "block", fontSize: 12, fontWeight: 600, color: "#7A6B4C", marginBottom: 6 },
   noVendorWarn: { fontSize: 12.5, color: "#A14B2C", background: "#FBEDE6", padding: "8px 10px", borderRadius: 8 },
-  vendorPicker: { display: "flex", flexWrap: "wrap", gap: 6 },
-  vendorOption: { display: "flex", alignItems: "center", gap: 6, border: "1px solid", borderRadius: 8, padding: "6px 10px", fontSize: 12.5, fontWeight: 500 },
-  vendorOptionSede: { fontSize: 10.5, opacity: 0.7, fontWeight: 400 },
+  vendorSelectRow: { display: "flex", alignItems: "center", gap: 8 },
   modalActions: { display: "flex", alignItems: "center", gap: 8, marginTop: 18, flexWrap: "wrap" },
 
   toast: { position: "fixed", bottom: 20, left: "50%", transform: "translateX(-50%)", background: "#2B2620", color: "#FBF8F2", padding: "9px 16px", borderRadius: 9, fontSize: 13, fontWeight: 500, boxShadow: "0 6px 18px rgba(0,0,0,0.25)", zIndex: 60 },

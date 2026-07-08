@@ -2304,6 +2304,7 @@ export default function AgendaVendedores() {
   const [vistaGraficoMensual, setVistaGraficoMensual] = useState("total");
   const [vendedorLeyendaExpandido, setVendedorLeyendaExpandido] = useState(null);
   const [avisoDatosExpandido, setAvisoDatosExpandido] = useState(null); // "gestor" | "vendedor" | null
+  const [filtroGestorAgenda, setFiltroGestorAgenda] = useState(""); // gestorId, o "" para ver todos
 
   const hayFiltrosInformeActivos =
     informeFiltroMesAnio || informeFiltroDesde || informeFiltroHasta || informeFiltroMarca || informeFiltroGestor || informeFiltroVendedor;
@@ -3798,18 +3799,39 @@ export default function AgendaVendedores() {
         <div style={styles.panel}>
           {gestores.length > 0 && (
             <div style={styles.leyendaGestoresBar}>
-              <span style={styles.informeFiltroLabel}>Color por gestor:</span>
+              <span style={styles.informeFiltroLabel}>{filtroGestorAgenda ? "Mostrando solo:" : "Color por gestor:"}</span>
+              {filtroGestorAgenda && (
+                <button onClick={() => setFiltroGestorAgenda("")} style={styles.leyendaGestorTodos}>
+                  <X size={11} /> Ver todos
+                </button>
+              )}
               {gestores.map((g) => {
                 const cg = colorParaGestor(g.id, gestoresOrdenadosPorId);
+                const activo = filtroGestorAgenda === g.id;
+                const atenuado = filtroGestorAgenda && !activo;
                 return (
-                  <span key={g.id} style={{ ...styles.leyendaGestorChip, background: cg.bg, borderColor: cg.border, color: cg.text }}>
+                  <button
+                    key={g.id}
+                    onClick={() => setFiltroGestorAgenda(activo ? "" : g.id)}
+                    style={{
+                      ...styles.leyendaGestorChip,
+                      background: cg.bg,
+                      borderColor: cg.border,
+                      color: cg.text,
+                      opacity: atenuado ? 0.4 : 1,
+                      boxShadow: activo ? `0 0 0 2px ${cg.border}` : "none",
+                    }}
+                    title={`Ver solo las citas de ${g.nombre}`}
+                  >
                     {g.nombre}
-                  </span>
+                  </button>
                 );
               })}
-              <span style={{ ...styles.leyendaGestorChip, background: COLOR_SIN_GESTOR.bg, borderColor: COLOR_SIN_GESTOR.border, color: COLOR_SIN_GESTOR.text }}>
-                Sin gestor
-              </span>
+              {!filtroGestorAgenda && (
+                <span style={{ ...styles.leyendaGestorChip, background: COLOR_SIN_GESTOR.bg, borderColor: COLOR_SIN_GESTOR.border, color: COLOR_SIN_GESTOR.text }}>
+                  Sin gestor
+                </span>
+              )}
             </div>
           )}
           <div style={styles.agendaScrollWrap}>
@@ -3827,7 +3849,9 @@ export default function AgendaVendedores() {
                 <div style={styles.agendaHourLabel}>{horaLabel(h)}</div>
                 {DIAS.map((_, dayIdx) => {
                   const disponibles = vendoresDisponibles(dayIdx, h);
-                  const citasSlot = citasActivas.filter((c) => c.day === dayIdx && c.hour === h);
+                  const citasSlot = citasActivas.filter(
+                    (c) => c.day === dayIdx && c.hour === h && (!filtroGestorAgenda || c.gestorId === filtroGestorAgenda)
+                  );
                   return (
                     <div key={dayIdx} style={styles.agendaCell}>
                       {citasSlot.map((c) => {
@@ -3930,7 +3954,8 @@ export default function AgendaVendedores() {
                         ) : (
                           citasDelMes.map((cita) => {
                             const g = gestores.find((gg) => gg.id === cita.gestorId);
-                            const vendida = cita.telefono ? esVendida(ventasParaTelefono(cita.telefono)) : false;
+                            const matches = cita.telefono ? ventasParaTelefono(cita.telefono) : [];
+                            const vendida = matches.length > 0 ? esVendida(matches) : null; // null = sin datos de venta
                             return (
                               <div key={cita.id} style={styles.legendDetalleRow}>
                                 <span style={styles.legendDetalleFecha}>
@@ -3938,7 +3963,12 @@ export default function AgendaVendedores() {
                                 </span>
                                 <span style={styles.legendDetalleCliente}>{cita.cliente || "Sin nombre"}</span>
                                 <span style={styles.legendDetalleGestor}>{g ? g.nombre : "Sin gestor"}</span>
-                                {vendida && <Check size={12} color="#4F9B72" style={{ flexShrink: 0 }} />}
+                                {cita.asistio === true && <span style={styles.citaChipAsistio}>Asistió</span>}
+                                {cita.asistio === false && <span style={styles.citaChipNoAsistio}>No asistió</span>}
+                                {vendida === true && (
+                                  <span style={styles.vendidaTag}><Check size={11} /> Vendido</span>
+                                )}
+                                {vendida === false && <span style={styles.pendienteTagRojo}>No vendido</span>}
                               </div>
                             );
                           })
@@ -4862,6 +4892,7 @@ const styles = {
   agendaScrollWrap: { overflowX: "auto" },
   leyendaGestoresBar: { display: "flex", flexWrap: "wrap", gap: 6, alignItems: "center", marginBottom: 14 },
   leyendaGestorChip: { fontSize: 11, fontWeight: 600, border: "1px solid", borderRadius: 999, padding: "3px 9px" },
+  leyendaGestorTodos: { display: "flex", alignItems: "center", gap: 4, fontSize: 11, fontWeight: 600, color: "#A14B2C", background: "#FBEDE6", border: "none", borderRadius: 999, padding: "3px 9px" },
   agendaGrid: { display: "grid", gridTemplateColumns: "58px repeat(6, minmax(150px, 1fr))", gap: 3, minWidth: 960 },
   mesNavRow: { display: "flex", alignItems: "center", gap: 8, marginBottom: 16 },
   mesGrid: { display: "grid", gridTemplateColumns: "repeat(7, 1fr)", gap: 4 },
@@ -4900,7 +4931,7 @@ const styles = {
   legendBar: { display: "block", height: "100%", borderRadius: 4 },
   legendCount: { fontSize: 12, fontWeight: 600, width: 20, textAlign: "right", color: "#5C5240" },
   legendDetalleWrap: { display: "flex", flexDirection: "column", gap: 4, padding: "8px 10px 8px 18px", background: "#FFFEFB", borderRadius: 7, marginTop: 2, marginBottom: 6, border: "1px solid #EFE9DA" },
-  legendDetalleRow: { display: "flex", alignItems: "center", gap: 8 },
+  legendDetalleRow: { display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" },
   legendDetalleFecha: { fontSize: 11, color: "#A89B7E", width: 90, flexShrink: 0 },
   legendDetalleCliente: { fontSize: 11.5, color: "#5C5240", flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
   legendDetalleGestor: { fontSize: 11, color: "#8A7B5C", flexShrink: 0 },

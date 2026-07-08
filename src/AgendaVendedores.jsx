@@ -141,6 +141,34 @@ function colorParaMarca(marca) {
   return MARCA_COLORES[marca] || { bg: "#F1EAD9", border: "#8A7B5C", text: "#5C5240" };
 }
 
+// Paleta de colores para diferenciar de un vistazo las citas de cada gestor lead (quien creó
+// la cita), independientemente de qué vendedor o sede la atienda. Se asigna de forma estable
+// mediante un hash del id del gestor, así que cada gestor siempre tiene el mismo color aunque
+// se añadan o eliminen otros gestores. Sin gestor asignado, se usa un gris neutro.
+const PALETA_GESTORES = [
+  { bg: "#E7EEF8", border: "#3F6FB0", text: "#1E3A60" },
+  { bg: "#E3F1F1", border: "#3F9999", text: "#1F4D4D" },
+  { bg: "#FBEFE6", border: "#C97C4A", text: "#7A4426" },
+  { bg: "#F3EFE3", border: "#A88B4A", text: "#5E4A1F" },
+  { bg: "#EAF5E3", border: "#7AAE4A", text: "#3D5E22" },
+  { bg: "#EDE7F3", border: "#7A5C9E", text: "#4A3A63" },
+  { bg: "#F7E7E3", border: "#B0473F", text: "#6B2C26" },
+  { bg: "#E3EEF7", border: "#3D7EB0", text: "#1F4560" },
+  { bg: "#FCEFE0", border: "#C97F2E", text: "#734A1A" },
+  { bg: "#E3F0EC", border: "#3D9184", text: "#20544D" },
+  { bg: "#F7EDF3", border: "#B0498E", text: "#6B2C56" },
+  { bg: "#EFEAE0", border: "#8A7550", text: "#4F4330" },
+];
+const COLOR_SIN_GESTOR = { bg: "#F1EAD9", border: "#A89B7E", text: "#5C5240" };
+function colorParaGestor(gestorId) {
+  if (!gestorId) return COLOR_SIN_GESTOR;
+  let hash = 0;
+  for (let i = 0; i < gestorId.length; i++) {
+    hash = (hash * 31 + gestorId.charCodeAt(i)) >>> 0;
+  }
+  return PALETA_GESTORES[hash % PALETA_GESTORES.length];
+}
+
 // Vistas de gestión puntual (no son del día a día), agrupadas bajo el menú "Gestión"
 // para no competir visualmente con Agenda y Sin cita, que son las de uso diario.
 const VISTAS_GESTION = ["turnos", "vendedores", "gestores", "ventas", "informe"];
@@ -3623,6 +3651,22 @@ export default function AgendaVendedores() {
 
       {vendedores.length > 0 && vista === "agenda" && modoAgendaVista === "semana" && (
         <div style={styles.panel}>
+          {gestores.length > 0 && (
+            <div style={styles.leyendaGestoresBar}>
+              <span style={styles.informeFiltroLabel}>Color por gestor:</span>
+              {gestores.map((g) => {
+                const cg = colorParaGestor(g.id);
+                return (
+                  <span key={g.id} style={{ ...styles.leyendaGestorChip, background: cg.bg, borderColor: cg.border, color: cg.text }}>
+                    {g.nombre}
+                  </span>
+                );
+              })}
+              <span style={{ ...styles.leyendaGestorChip, background: COLOR_SIN_GESTOR.bg, borderColor: COLOR_SIN_GESTOR.border, color: COLOR_SIN_GESTOR.text }}>
+                Sin gestor
+              </span>
+            </div>
+          )}
           <div style={styles.agendaScrollWrap}>
           <div style={styles.agendaGrid}>
             <div style={styles.agendaCorner}>Hora</div>
@@ -3644,7 +3688,8 @@ export default function AgendaVendedores() {
                       {citasSlot.map((c) => {
                         const v = vendedores.find((vv) => vv.id === c.vendorId);
                         const g = gestores.find((gg) => gg.id === c.gestorId);
-                        const colorV = v ? colorParaSede(v.isla, v.sede) : { bg: "#F1EAD9", border: "#A89B7E", text: "#5C5240" };
+                        const colorGestor = colorParaGestor(c.gestorId);
+                        const colorSede = v ? colorParaSede(v.isla, v.sede) : null;
                         const vendida = citasConVenta.has(c.id);
                         const noAsistio = c.asistio === false;
                         const fueraDeFiltro = v ? !vendedoresFiltrados.some((vf) => vf.id === v.id) : false;
@@ -3658,15 +3703,15 @@ export default function AgendaVendedores() {
                             onClick={() => setModalCita({ existing: c })}
                             style={{
                               ...styles.citaChip,
-                              background: colorV.bg,
-                              borderColor: colorV.border,
-                              color: colorV.text,
+                              background: colorGestor.bg,
+                              borderColor: colorGestor.border,
+                              color: colorGestor.text,
                               opacity: fueraDeFiltro ? 0.4 : noAsistio ? 0.6 : 1,
                               ...(!v ? { borderStyle: "dashed" } : {}),
                             }}
                             title={`${horaExactaLabel ? horaExactaLabel + " · " : ""}${v ? v.nombre : "Sin vendedor asignado"}${c.cliente ? " · " + c.cliente : ""}${c.telefono ? " · " + c.telefono : ""}${g ? " · Gestor: " + g.nombre : ""}${c.marca ? " · " + c.marca : ""}${noAsistio ? " · No asistió" : c.asistio === true ? " · Asistió" : ""}`}
                           >
-                            <span style={{ ...styles.citaDot, background: colorV.border }} />
+                            {colorSede && <span style={{ ...styles.citaDot, background: colorSede.border }} />}
                             {c.marca && <span style={{ ...styles.citaDot, background: colorParaMarca(c.marca).border }} />}
                             <span style={styles.citaChipTextWrap}>
                               <span style={styles.citaChipText}>
@@ -4657,6 +4702,8 @@ const styles = {
   turnoCell: { height: 18, border: "1px solid #E5E0D4", borderRadius: 4, background: "transparent", display: "flex", alignItems: "center", justifyContent: "center", padding: 0 },
 
   agendaScrollWrap: { overflowX: "auto" },
+  leyendaGestoresBar: { display: "flex", flexWrap: "wrap", gap: 6, alignItems: "center", marginBottom: 14 },
+  leyendaGestorChip: { fontSize: 11, fontWeight: 600, border: "1px solid", borderRadius: 999, padding: "3px 9px" },
   agendaGrid: { display: "grid", gridTemplateColumns: "58px repeat(6, minmax(150px, 1fr))", gap: 3, minWidth: 960 },
   mesNavRow: { display: "flex", alignItems: "center", gap: 8, marginBottom: 16 },
   mesGrid: { display: "grid", gridTemplateColumns: "repeat(7, 1fr)", gap: 4 },

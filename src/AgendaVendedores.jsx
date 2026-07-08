@@ -142,9 +142,10 @@ function colorParaMarca(marca) {
 }
 
 // Paleta de colores para diferenciar de un vistazo las citas de cada gestor lead (quien creó
-// la cita), independientemente de qué vendedor o sede la atienda. Se asigna de forma estable
-// mediante un hash del id del gestor, así que cada gestor siempre tiene el mismo color aunque
-// se añadan o eliminen otros gestores. Sin gestor asignado, se usa un gris neutro.
+// la cita), independientemente de qué vendedor o sede la atienda. Se asigna por la posición del
+// gestor dentro de la lista completa ordenada por id (estable, no cambia aunque Firebase
+// devuelva los gestores en otro orden), así que mientras haya menos gestores que colores en la
+// paleta, nunca se repite ninguno. Sin gestor asignado, se usa un gris neutro.
 const PALETA_GESTORES = [
   { bg: "#E7EEF8", border: "#3F6FB0", text: "#1E3A60" },
   { bg: "#E3F1F1", border: "#3F9999", text: "#1F4D4D" },
@@ -160,13 +161,11 @@ const PALETA_GESTORES = [
   { bg: "#EFEAE0", border: "#8A7550", text: "#4F4330" },
 ];
 const COLOR_SIN_GESTOR = { bg: "#F1EAD9", border: "#A89B7E", text: "#5C5240" };
-function colorParaGestor(gestorId) {
-  if (!gestorId) return COLOR_SIN_GESTOR;
-  let hash = 0;
-  for (let i = 0; i < gestorId.length; i++) {
-    hash = (hash * 31 + gestorId.charCodeAt(i)) >>> 0;
-  }
-  return PALETA_GESTORES[hash % PALETA_GESTORES.length];
+function colorParaGestor(gestorId, gestoresOrdenados) {
+  if (!gestorId || !gestoresOrdenados) return COLOR_SIN_GESTOR;
+  const idx = gestoresOrdenados.findIndex((g) => g.id === gestorId);
+  if (idx === -1) return COLOR_SIN_GESTOR;
+  return PALETA_GESTORES[idx % PALETA_GESTORES.length];
 }
 
 // Vistas de gestión puntual (no son del día a día), agrupadas bajo el menú "Gestión"
@@ -939,6 +938,13 @@ export default function AgendaVendedores() {
 
   const { vendedores, loading, addVendedor, removeVendedor, updateVendedor } = useVendedoresSync();
   const { gestores, loadingGestores, addGestor, removeGestor } = useGestoresSync();
+
+  // Orden estable (por id) de los gestores, usado solo para asignar colores sin colisiones:
+  // no depende del orden en que Firebase devuelva la lista.
+  const gestoresOrdenadosPorId = useMemo(
+    () => [...gestores].sort((a, b) => a.id.localeCompare(b.id)),
+    [gestores]
+  );
   const { vacaciones, addVacacion, addVacacionesEnLote, removeVacacion } = useVacacionesSync();
   const { horariosHabituales, setHorarioHabitual } = useHorariosHabitualesSync();
   const { plantillasPersonalizadas, addPlantillaPersonalizada, removePlantillaPersonalizada } = usePlantillasPersonalizadasSync();
@@ -3655,7 +3661,7 @@ export default function AgendaVendedores() {
             <div style={styles.leyendaGestoresBar}>
               <span style={styles.informeFiltroLabel}>Color por gestor:</span>
               {gestores.map((g) => {
-                const cg = colorParaGestor(g.id);
+                const cg = colorParaGestor(g.id, gestoresOrdenadosPorId);
                 return (
                   <span key={g.id} style={{ ...styles.leyendaGestorChip, background: cg.bg, borderColor: cg.border, color: cg.text }}>
                     {g.nombre}
@@ -3688,7 +3694,7 @@ export default function AgendaVendedores() {
                       {citasSlot.map((c) => {
                         const v = vendedores.find((vv) => vv.id === c.vendorId);
                         const g = gestores.find((gg) => gg.id === c.gestorId);
-                        const colorGestor = colorParaGestor(c.gestorId);
+                        const colorGestor = colorParaGestor(c.gestorId, gestoresOrdenadosPorId);
                         const colorSede = v ? colorParaSede(v.isla, v.sede) : null;
                         const vendida = citasConVenta.has(c.id);
                         const noAsistio = c.asistio === false;

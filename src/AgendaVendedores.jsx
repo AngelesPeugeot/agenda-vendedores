@@ -3623,6 +3623,7 @@ export default function AgendaVendedores() {
 
       {vendedores.length > 0 && vista === "agenda" && modoAgendaVista === "semana" && (
         <div style={styles.panel}>
+          <div style={styles.agendaScrollWrap}>
           <div style={styles.agendaGrid}>
             <div style={styles.agendaCorner}>Hora</div>
             {weekDates.map((d, i) => (
@@ -3695,6 +3696,7 @@ export default function AgendaVendedores() {
                 })}
               </FragmentRow>
             ))}
+          </div>
           </div>
 
           <div style={styles.legendTitulo}>Carga de citas este mes (por vendedor)</div>
@@ -4654,7 +4656,8 @@ const styles = {
   turnoHourLabel: { fontSize: 10.5, color: "#A89B7E", display: "flex", alignItems: "center", justifyContent: "flex-end", paddingRight: 6 },
   turnoCell: { height: 18, border: "1px solid #E5E0D4", borderRadius: 4, background: "transparent", display: "flex", alignItems: "center", justifyContent: "center", padding: 0 },
 
-  agendaGrid: { display: "grid", gridTemplateColumns: "58px repeat(6, 1fr)", gap: 3 },
+  agendaScrollWrap: { overflowX: "auto" },
+  agendaGrid: { display: "grid", gridTemplateColumns: "58px repeat(6, minmax(150px, 1fr))", gap: 3, minWidth: 960 },
   mesNavRow: { display: "flex", alignItems: "center", gap: 8, marginBottom: 16 },
   mesGrid: { display: "grid", gridTemplateColumns: "repeat(7, 1fr)", gap: 4 },
   mesDiaSemanaHeader: { fontSize: 11, fontWeight: 700, color: "#7A6B4C", textAlign: "center", paddingBottom: 6 },

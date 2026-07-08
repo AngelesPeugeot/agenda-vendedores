@@ -2044,6 +2044,27 @@ export default function AgendaVendedores() {
   const minCarga = vendedores.length ? Math.min(...Object.values(cargaPorVendedor)) : 0;
   const desbalanceado = vendedores.length > 1 && maxCarga - minCarga >= 2;
 
+  // Citas del mes en curso agrupadas por vendedor, ordenadas por fecha, para el detalle
+  // expandible de la leyenda "Carga de citas este mes". Mismo criterio de mes que cargaPorVendedor.
+  const citasDelMesPorVendedor = useMemo(() => {
+    const map = {};
+    const fechaRef = weekDates[0];
+    const anio = fechaRef.getFullYear();
+    const mes = fechaRef.getMonth();
+    todasLasCitas.forEach((c) => {
+      if (c.estado === "cancelada") return;
+      const fecha = fechaDeCitaSemana(c.weekKey, c.day);
+      if (fecha && fecha.getFullYear() === anio && fecha.getMonth() === mes) {
+        if (!map[c.vendorId]) map[c.vendorId] = [];
+        map[c.vendorId].push({ ...c, fecha });
+      }
+    });
+    Object.keys(map).forEach((vendorId) => {
+      map[vendorId].sort((a, b) => a.fecha - b.fecha || a.hour - b.hour);
+    });
+    return map;
+  }, [todasLasCitas, weekDates]);
+
   // Vendedores con algún día de vacaciones dentro de la semana que se está viendo, para
   // avisar visualmente en la leyenda de la agenda aunque no ocupen ningún slot concreto.
   const vendedoresDeVacacionesEstaSemana = useMemo(() => {
@@ -2281,6 +2302,7 @@ export default function AgendaVendedores() {
   const [informeFiltroGestor, setInformeFiltroGestor] = useState("");
   const [informeFiltroVendedor, setInformeFiltroVendedor] = useState("");
   const [vistaGraficoMensual, setVistaGraficoMensual] = useState("total");
+  const [vendedorLeyendaExpandido, setVendedorLeyendaExpandido] = useState(null);
 
   const hayFiltrosInformeActivos =
     informeFiltroMesAnio || informeFiltroDesde || informeFiltroHasta || informeFiltroMarca || informeFiltroGestor || informeFiltroVendedor;
@@ -3758,22 +3780,52 @@ export default function AgendaVendedores() {
               vendedoresFiltrados.map((v) => {
                 const c = colorParaSede(v.isla, v.sede);
                 const deVacaciones = vendedoresDeVacacionesEstaSemana.has(v.id);
+                const expandido = vendedorLeyendaExpandido === v.id;
+                const citasDelMes = citasDelMesPorVendedor[v.id] || [];
                 return (
-                  <div key={v.id} style={{ ...styles.legendItem, opacity: deVacaciones ? 0.55 : 1 }}>
-                    <span style={{ ...styles.vendorDot, background: c.border }} />
-                    <span style={styles.legendName}>{v.nombre}</span>
-                    <span style={styles.legendLocation}>{v.sede}</span>
-                    {deVacaciones && <span style={styles.legendVacacionesTag}>De vacaciones</span>}
-                    <span style={styles.legendBarWrap}>
-                      <span
-                        style={{
-                          ...styles.legendBar,
-                          width: `${Math.max(6, ((cargaPorVendedor[v.id] || 0) / maxCarga) * 100)}%`,
-                          background: c.border,
-                        }}
-                      />
-                    </span>
-                    <span style={styles.legendCount}>{cargaPorVendedor[v.id] || 0}</span>
+                  <div key={v.id}>
+                    <button
+                      onClick={() => setVendedorLeyendaExpandido(expandido ? null : v.id)}
+                      style={{ ...styles.legendItemBtn, opacity: deVacaciones ? 0.55 : 1 }}
+                    >
+                      <span style={{ ...styles.vendorDot, background: c.border }} />
+                      <span style={styles.legendName}>{v.nombre}</span>
+                      <span style={styles.legendLocation}>{v.sede}</span>
+                      {deVacaciones && <span style={styles.legendVacacionesTag}>De vacaciones</span>}
+                      <span style={styles.legendBarWrap}>
+                        <span
+                          style={{
+                            ...styles.legendBar,
+                            width: `${Math.max(6, ((cargaPorVendedor[v.id] || 0) / maxCarga) * 100)}%`,
+                            background: c.border,
+                          }}
+                        />
+                      </span>
+                      <span style={styles.legendCount}>{cargaPorVendedor[v.id] || 0}</span>
+                      <ChevronDown size={13} style={{ transform: expandido ? "none" : "rotate(-90deg)", flexShrink: 0, color: "#A89B7E" }} />
+                    </button>
+                    {expandido && (
+                      <div style={styles.legendDetalleWrap}>
+                        {citasDelMes.length === 0 ? (
+                          <div style={styles.panelHint}>Sin citas este mes.</div>
+                        ) : (
+                          citasDelMes.map((cita) => {
+                            const g = gestores.find((gg) => gg.id === cita.gestorId);
+                            const vendida = cita.telefono ? esVendida(ventasParaTelefono(cita.telefono)) : false;
+                            return (
+                              <div key={cita.id} style={styles.legendDetalleRow}>
+                                <span style={styles.legendDetalleFecha}>
+                                  {fmtDateShort(cita.fecha)} {horaLabel(cita.horaExacta != null ? cita.horaExacta : cita.hour)}
+                                </span>
+                                <span style={styles.legendDetalleCliente}>{cita.cliente || "Sin nombre"}</span>
+                                <span style={styles.legendDetalleGestor}>{g ? g.nombre : "Sin gestor"}</span>
+                                {vendida && <Check size={12} color="#4F9B72" style={{ flexShrink: 0 }} />}
+                              </div>
+                            );
+                          })
+                        )}
+                      </div>
+                    )}
                   </div>
                 );
               })
@@ -4739,12 +4791,18 @@ const styles = {
   legendTitulo: { marginTop: 20, fontSize: 12, fontWeight: 600, color: "#7A6B4C" },
   legend: { marginTop: 8, display: "flex", flexDirection: "column", gap: 7, maxWidth: 500 },
   legendItem: { display: "flex", alignItems: "center", gap: 8 },
+  legendItemBtn: { display: "flex", alignItems: "center", gap: 8, width: "100%", border: "none", background: "transparent", padding: "3px 0", cursor: "pointer", textAlign: "left" },
   legendName: { fontSize: 12, width: 100, flexShrink: 0, color: "#5C5240", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
   legendLocation: { fontSize: 11, color: "#A89B7E", width: 90, flexShrink: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
   legendVacacionesTag: { fontSize: 10, fontWeight: 600, color: "#8A5E10", background: "#FBF1DE", padding: "2px 7px", borderRadius: 999, flexShrink: 0 },
   legendBarWrap: { flex: 1, height: 7, background: "#F1EAD9", borderRadius: 4, overflow: "hidden" },
   legendBar: { display: "block", height: "100%", borderRadius: 4 },
   legendCount: { fontSize: 12, fontWeight: 600, width: 20, textAlign: "right", color: "#5C5240" },
+  legendDetalleWrap: { display: "flex", flexDirection: "column", gap: 4, padding: "8px 10px 8px 18px", background: "#FFFEFB", borderRadius: 7, marginTop: 2, marginBottom: 6, border: "1px solid #EFE9DA" },
+  legendDetalleRow: { display: "flex", alignItems: "center", gap: 8 },
+  legendDetalleFecha: { fontSize: 11, color: "#A89B7E", width: 90, flexShrink: 0 },
+  legendDetalleCliente: { fontSize: 11.5, color: "#5C5240", flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
+  legendDetalleGestor: { fontSize: 11, color: "#8A7B5C", flexShrink: 0 },
 
   informeResumenGrid: { display: "flex", gap: 24, flexWrap: "wrap", alignItems: "flex-start", marginBottom: 26 },
   informeStatsCol: { flex: 1, minWidth: 240 },

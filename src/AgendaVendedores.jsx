@@ -1556,6 +1556,38 @@ export default function AgendaVendedores() {
     return map;
   }, [todasLasCitas]);
 
+  // Desglose de citas por día, agrupado por gestor lead y, dentro de cada gestor, por sede del
+  // vendedor asignado — para la vista mensual. Respeta el filtro de isla/sede/marca activo (las
+  // citas sin vendedor asignado se mantienen siempre visibles, ya que no tienen sede que filtrar).
+  const detalleCitasPorDiaDelMes = useMemo(() => {
+    const map = {}; // "YYYY-MM-DD" -> [{ gestorNombre, gestorId, sedes: [{ sede, count }], total }]
+    const acumulador = {};
+    todasLasCitas.forEach((c) => {
+      if (c.estado === "cancelada") return;
+      const v = vendedores.find((vv) => vv.id === c.vendorId);
+      if (v && !vendedoresFiltrados.some((vf) => vf.id === v.id)) return;
+      const fecha = fechaDeCitaSemana(c.weekKey, c.day);
+      if (!fecha) return;
+      const key = fecha.toISOString().slice(0, 10);
+      const g = gestores.find((gg) => gg.id === c.gestorId);
+      const gestorNombre = g?.nombre || "Sin gestor";
+      const sedeNombre = v?.sede || "Sin vendedor";
+      if (!acumulador[key]) acumulador[key] = {};
+      if (!acumulador[key][gestorNombre]) acumulador[key][gestorNombre] = { gestorId: c.gestorId || "", sedes: {} };
+      acumulador[key][gestorNombre].sedes[sedeNombre] = (acumulador[key][gestorNombre].sedes[sedeNombre] || 0) + 1;
+    });
+    Object.entries(acumulador).forEach(([key, gestoresDia]) => {
+      map[key] = Object.entries(gestoresDia)
+        .map(([gestorNombre, datos]) => {
+          const sedes = Object.entries(datos.sedes).map(([sede, count]) => ({ sede, count }));
+          const total = sedes.reduce((sum, s) => sum + s.count, 0);
+          return { gestorNombre, gestorId: datos.gestorId, sedes, total };
+        })
+        .sort((a, b) => b.total - a.total);
+    });
+    return map;
+  }, [todasLasCitas, vendedores, gestores, vendedoresFiltrados]);
+
   // Vendedores (según el filtro activo) de vacaciones cada día del mes que se está viendo.
   const vacacionesPorDiaDelMes = useMemo(() => {
     const map = {};
@@ -2064,6 +2096,21 @@ export default function AgendaVendedores() {
     });
     return map;
   }, [todasLasCitas, weekDates]);
+
+  // Ventas y % de cierre por vendedor este mes: de todas sus citas del mes, cuántas aparecen
+  // como vendidas en los listados subidos. Mismo criterio de mes que citasDelMesPorVendedor.
+  const cierrePorVendedorMes = useMemo(() => {
+    const map = {};
+    Object.entries(citasDelMesPorVendedor).forEach(([vendorId, citasList]) => {
+      const ventas = citasList.filter((cita) => {
+        const matches = cita.telefono ? ventasParaTelefono(cita.telefono) : [];
+        return matches.length > 0 && esVendida(matches);
+      }).length;
+      const total = citasList.length;
+      map[vendorId] = { ventas, total, porcentaje: total > 0 ? Math.round((ventas / total) * 100) : 0 };
+    });
+    return map;
+  }, [citasDelMesPorVendedor, ventasParaTelefono, esVendida]);
 
   // Vendedores con algún día de vacaciones dentro de la semana que se está viendo, para
   // avisar visualmente en la leyenda de la agenda aunque no ocupen ningún slot concreto.
@@ -3916,6 +3963,15 @@ export default function AgendaVendedores() {
           </div>
 
           <div style={styles.legendTitulo}>Carga de citas este mes (por vendedor)</div>
+          <div style={styles.legendTablaHeader}>
+            <span style={{ width: 9, flexShrink: 0 }} />
+            <span style={styles.legendName}>Vendedor</span>
+            <span style={styles.legendLocation}>Sede</span>
+            <span style={styles.legendBarWrap} />
+            <span style={styles.legendCount}>Citas</span>
+            <span style={styles.legendCierreCol}>% Cierre</span>
+            <span style={{ width: 13, flexShrink: 0 }} />
+          </div>
           <div style={styles.legend}>
             {vendedoresFiltrados.length === 0 ? (
               <div style={styles.panelHint}>Ningún vendedor coincide con el filtro de isla/sede seleccionado.</div>
@@ -3925,6 +3981,7 @@ export default function AgendaVendedores() {
                 const deVacaciones = vendedoresDeVacacionesEstaSemana.has(v.id);
                 const expandido = vendedorLeyendaExpandido === v.id;
                 const citasDelMes = citasDelMesPorVendedor[v.id] || [];
+                const cierre = cierrePorVendedorMes[v.id];
                 return (
                   <div key={v.id}>
                     <button
@@ -3945,6 +4002,9 @@ export default function AgendaVendedores() {
                         />
                       </span>
                       <span style={styles.legendCount}>{cargaPorVendedor[v.id] || 0}</span>
+                      <span style={{ ...styles.legendCierreCol, color: cierre && cierre.porcentaje >= 20 ? "#2F5E3F" : "#8A7B5C", fontWeight: cierre && cierre.total > 0 ? 700 : 400 }}>
+                        {cierre && cierre.total > 0 ? `${cierre.porcentaje}%` : "—"}
+                      </span>
                       <ChevronDown size={13} style={{ transform: expandido ? "none" : "rotate(-90deg)", flexShrink: 0, color: "#A89B7E" }} />
                     </button>
                     {expandido && (
@@ -3952,26 +4012,41 @@ export default function AgendaVendedores() {
                         {citasDelMes.length === 0 ? (
                           <div style={styles.panelHint}>Sin citas este mes.</div>
                         ) : (
-                          citasDelMes.map((cita) => {
-                            const g = gestores.find((gg) => gg.id === cita.gestorId);
-                            const matches = cita.telefono ? ventasParaTelefono(cita.telefono) : [];
-                            const vendida = matches.length > 0 ? esVendida(matches) : null; // null = sin datos de venta
-                            return (
-                              <div key={cita.id} style={styles.legendDetalleRow}>
-                                <span style={styles.legendDetalleFecha}>
-                                  {fmtDateShort(cita.fecha)} {horaLabel(cita.horaExacta != null ? cita.horaExacta : cita.hour)}
-                                </span>
-                                <span style={styles.legendDetalleCliente}>{cita.cliente || "Sin nombre"}</span>
-                                <span style={styles.legendDetalleGestor}>{g ? g.nombre : "Sin gestor"}</span>
-                                {cita.asistio === true && <span style={styles.citaChipAsistio}>Asistió</span>}
-                                {cita.asistio === false && <span style={styles.citaChipNoAsistio}>No asistió</span>}
-                                {vendida === true && (
-                                  <span style={styles.vendidaTag}><Check size={11} /> Vendido</span>
-                                )}
-                                {vendida === false && <span style={styles.pendienteTagRojo}>No vendido</span>}
-                              </div>
-                            );
-                          })
+                          <>
+                            <div style={styles.legendDetalleHeaderRow}>
+                              <span style={styles.legendDetalleFecha}>Fecha</span>
+                              <span style={styles.legendDetalleCliente}>Cliente</span>
+                              <span style={styles.legendDetalleGestor}>Gestor</span>
+                              <span style={styles.legendDetalleColEstado}>Asistencia</span>
+                              <span style={styles.legendDetalleColEstado}>Venta</span>
+                            </div>
+                            {citasDelMes.map((cita) => {
+                              const g = gestores.find((gg) => gg.id === cita.gestorId);
+                              const matches = cita.telefono ? ventasParaTelefono(cita.telefono) : [];
+                              const vendida = matches.length > 0 ? esVendida(matches) : null; // null = sin datos de venta
+                              return (
+                                <div key={cita.id} style={styles.legendDetalleRow}>
+                                  <span style={styles.legendDetalleFecha}>
+                                    {fmtDateShort(cita.fecha)} {horaLabel(cita.horaExacta != null ? cita.horaExacta : cita.hour)}
+                                  </span>
+                                  <span style={styles.legendDetalleCliente}>{cita.cliente || "Sin nombre"}</span>
+                                  <span style={styles.legendDetalleGestor}>{g ? g.nombre : "Sin gestor"}</span>
+                                  <span style={styles.legendDetalleColEstado}>
+                                    {cita.asistio === true && <span style={styles.citaChipAsistio}>Asistió</span>}
+                                    {cita.asistio === false && <span style={styles.citaChipNoAsistio}>No asistió</span>}
+                                    {cita.asistio == null && <span style={styles.pendienteTag}>—</span>}
+                                  </span>
+                                  <span style={styles.legendDetalleColEstado}>
+                                    {vendida === true && (
+                                      <span style={styles.vendidaTag}><Check size={11} /> Vendido</span>
+                                    )}
+                                    {vendida === false && <span style={styles.pendienteTagRojo}>No vendido</span>}
+                                    {vendida === null && <span style={styles.pendienteTag}>—</span>}
+                                  </span>
+                                </div>
+                              );
+                            })}
+                          </>
                         )}
                       </div>
                     )}
@@ -4006,6 +4081,7 @@ export default function AgendaVendedores() {
               if (!fecha) return <div key={i} style={styles.mesCeldaVacia} />;
               const key = fecha.toISOString().slice(0, 10);
               const numCitas = citasPorDiaDelMes[key] || 0;
+              const detalle = detalleCitasPorDiaDelMes[key] || [];
               const numVacaciones = vacacionesPorDiaDelMes[key] || 0;
               const esHoy = key === fmtWeekKey(new Date());
               const esDomingo = fecha.getDay() === 0;
@@ -4022,11 +4098,25 @@ export default function AgendaVendedores() {
                     ...(esDomingo ? styles.mesCeldaDomingo : {}),
                   }}
                 >
-                  <span style={styles.mesCeldaNumero}>{fecha.getDate()}</span>
-                  {numCitas > 0 && (
-                    <span style={styles.mesCeldaCitas}>
-                      <Calendar size={10} /> {numCitas}
-                    </span>
+                  <span style={styles.mesCeldaHeaderRow}>
+                    <span style={styles.mesCeldaNumero}>{fecha.getDate()}</span>
+                    {numCitas > 0 && (
+                      <span style={styles.mesCeldaCitas}>
+                        <Calendar size={10} /> {numCitas}
+                      </span>
+                    )}
+                  </span>
+                  {detalle.length > 0 && (
+                    <div style={styles.mesCeldaDetalleWrap}>
+                      {detalle.map((g) => {
+                        const cg = colorParaGestor(g.gestorId, gestoresOrdenadosPorId);
+                        return (
+                          <div key={g.gestorNombre} style={{ ...styles.mesCeldaGestorLinea, color: cg.text }} title={`${g.gestorNombre}: ${g.sedes.map((s) => `${s.count} ${s.sede}`).join(", ")}`}>
+                            <strong>{g.gestorNombre.split(" ")[0]}</strong> {g.sedes.map((s) => `${s.count} ${s.sede}`).join(", ")}
+                          </div>
+                        );
+                      })}
+                    </div>
                   )}
                   {numVacaciones > 0 && (
                     <span style={styles.mesCeldaVacaciones}>{numVacaciones} de vacaciones</span>
@@ -4898,10 +4988,13 @@ const styles = {
   mesGrid: { display: "grid", gridTemplateColumns: "repeat(7, 1fr)", gap: 4 },
   mesDiaSemanaHeader: { fontSize: 11, fontWeight: 700, color: "#7A6B4C", textAlign: "center", paddingBottom: 6 },
   mesCeldaVacia: { minHeight: 78, background: "transparent" },
-  mesCelda: { minHeight: 78, border: "1px solid #EFE9DA", borderRadius: 8, background: "#FFFEFB", padding: "6px 7px", display: "flex", flexDirection: "column", alignItems: "flex-start", gap: 4, textAlign: "left" },
+  mesCelda: { minHeight: 78, height: "auto", border: "1px solid #EFE9DA", borderRadius: 8, background: "#FFFEFB", padding: "6px 7px", display: "flex", flexDirection: "column", alignItems: "flex-start", gap: 3, textAlign: "left" },
   mesCeldaHoy: { borderColor: "#C45A2E", borderWidth: 2 },
   mesCeldaDomingo: { background: "#F7F3E8", opacity: 0.7 },
   mesCeldaNumero: { fontSize: 13, fontWeight: 600, color: "#3D362A" },
+  mesCeldaHeaderRow: { display: "flex", alignItems: "center", justifyContent: "space-between", width: "100%" },
+  mesCeldaDetalleWrap: { display: "flex", flexDirection: "column", gap: 1, width: "100%" },
+  mesCeldaGestorLinea: { fontSize: 9.5, lineHeight: 1.3, whiteSpace: "normal", wordBreak: "break-word" },
   mesCeldaCitas: { display: "flex", alignItems: "center", gap: 3, fontSize: 10.5, fontWeight: 600, color: "#2F5E3F", background: "#EAF2EC", padding: "2px 6px", borderRadius: 999 },
   mesCeldaVacaciones: { fontSize: 9.5, color: "#8A5E10", background: "#FBF1DE", padding: "2px 6px", borderRadius: 999 },
   agendaCorner: { fontSize: 10.5, color: "#A89B7E", paddingBottom: 6 },
@@ -4921,7 +5014,9 @@ const styles = {
   citaChipAsistio: { fontSize: 9, fontWeight: 700, color: "#2F5E3F", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
 
   legendTitulo: { marginTop: 20, fontSize: 12, fontWeight: 600, color: "#7A6B4C" },
-  legend: { marginTop: 8, display: "flex", flexDirection: "column", gap: 7, maxWidth: 500 },
+  legend: { marginTop: 4, display: "flex", flexDirection: "column", gap: 7, width: "100%" },
+  legendTablaHeader: { display: "flex", alignItems: "center", gap: 8, marginTop: 8, marginBottom: 2, paddingBottom: 4, borderBottom: "1px solid #EFE9DA", fontSize: 10.5, fontWeight: 700, color: "#A89B7E", textTransform: "uppercase", letterSpacing: 0.3 },
+  legendCierreCol: { fontSize: 12, fontWeight: 600, width: 60, textAlign: "right", flexShrink: 0 },
   legendItem: { display: "flex", alignItems: "center", gap: 8 },
   legendItemBtn: { display: "flex", alignItems: "center", gap: 8, width: "100%", border: "none", background: "transparent", padding: "3px 0", cursor: "pointer", textAlign: "left" },
   legendName: { fontSize: 12, width: 100, flexShrink: 0, color: "#5C5240", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
@@ -4934,7 +5029,9 @@ const styles = {
   legendDetalleRow: { display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" },
   legendDetalleFecha: { fontSize: 11, color: "#A89B7E", width: 90, flexShrink: 0 },
   legendDetalleCliente: { fontSize: 11.5, color: "#5C5240", flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
-  legendDetalleGestor: { fontSize: 11, color: "#8A7B5C", flexShrink: 0 },
+  legendDetalleGestor: { fontSize: 11, color: "#8A7B5C", width: 110, flexShrink: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
+  legendDetalleHeaderRow: { display: "flex", alignItems: "center", gap: 8, paddingBottom: 4, marginBottom: 2, borderBottom: "1px solid #EFE9DA", fontSize: 10, fontWeight: 700, color: "#A89B7E", textTransform: "uppercase", letterSpacing: 0.3 },
+  legendDetalleColEstado: { width: 100, flexShrink: 0 },
 
   informeResumenGrid: { display: "flex", gap: 24, flexWrap: "wrap", alignItems: "flex-start", marginBottom: 26 },
   informeStatsCol: { flex: 1, minWidth: 240 },

@@ -233,7 +233,7 @@ function parseAnyDate(val) {
   if (val instanceof Date && !isNaN(val)) return val;
   if (typeof val === "number") {
     const d = XLSX.SSF.parse_date_code(val);
-    if (d) return new Date(d.y, d.m - 1, d.d);
+    if (d) return new Date(d.y, d.m - 1, d.d, d.H || 0, d.M || 0, Math.round(d.S || 0));
     return null;
   }
   const s = String(val).trim();
@@ -298,6 +298,15 @@ function horaTextoADecimalSimple(texto) {
   const min = Number(m[2]);
   if (min < 0 || min > 59) return null;
   return h + min / 60;
+}
+
+// Extrae la hora del día (en decimal, ej. 14.5 = 14:30) de una celda de Excel que puede venir
+// como objeto Date (con cellDates activado), como fracción de día (número entre 0 y 1, formato
+// nativo de hora en Excel) o como texto "HH:MM". Devuelve null si no se puede interpretar.
+function horaDeCelda(val) {
+  if (val instanceof Date && !isNaN(val)) return val.getHours() + val.getMinutes() / 60;
+  if (typeof val === "number" && val > 0 && val < 1) return val * 24;
+  return horaTextoADecimalSimple(String(val ?? "").trim());
 }
 
 function slotsDia() {
@@ -968,6 +977,9 @@ export default function AgendaVendedores() {
   const [errorVacaciones, setErrorVacaciones] = useState(null);
   const [subiendoVacaciones, setSubiendoVacaciones] = useState(false);
   const fileInputVacacionesRef = useRef(null);
+  const [subiendoCitasCalendario, setSubiendoCitasCalendario] = useState(false);
+  const [errorCitasCalendario, setErrorCitasCalendario] = useState(null);
+  const fileInputCitasCalendarioRef = useRef(null);
   const [nuevoLeadCliente, setNuevoLeadCliente] = useState("");
   const [nuevoLeadTelefono, setNuevoLeadTelefono] = useState("");
   const [nuevoLeadGestorId, setNuevoLeadGestorId] = useState("");
@@ -1207,6 +1219,141 @@ export default function AgendaVendedores() {
       }
     },
     [vendedores, addVacacionesEnLote, showToast]
+  );
+
+  // ---------- Importar citas al calendario desde Excel ----------
+  // A diferencia del histórico/cotejo (que solo alimentan KPIs), esto escribe citas REALES en
+  // la agenda operativa. Por eso: solo se procesan filas con fecha+hora válida dentro del
+  // horario laboral y de lunes a sábado; se evita duplicar si ya existe una cita con el mismo
+  // teléfono en la misma semana/día/franja; y si el vendedor no se reconoce, la cita se crea
+  // igualmente pero sin asignar, para revisarla luego a mano.
+  const handleImportarCitasAlCalendario = useCallback(
+    async (file) => {
+      if (!file) return;
+      if (!firebaseDisponible) {
+        setErrorCitasCalendario("Importar citas al calendario requiere estar conectado a Firebase.");
+        return;
+      }
+      setSubiendoCitasCalendario(true);
+      setErrorCitasCalendario(null);
+      try {
+        const buf = await file.arrayBuffer();
+        const wb = XLSX.read(buf, { type: "array", cellDates: true });
+        const sheet = wb.Sheets[wb.SheetNames[0]];
+        const rows = XLSX.utils.sheet_to_json(sheet, { defval: "" });
+
+        if (rows.length === 0) {
+          setErrorCitasCalendario("El archivo no tiene filas con datos.");
+          setSubiendoCitasCalendario(false);
+          return;
+        }
+
+        const keys = Object.keys(rows[0]);
+        const findKey = (...patterns) =>
+          keys.find((k) => patterns.some((p) => k.toLowerCase().replace(/[^a-z0-9]/g, "").includes(p)));
+
+        const kPhone = findKey("telefono", "tel", "movil", "phone");
+        const kDate = findKey("fecha");
+        const kHora = findKey("hora", "time");
+        const kVendedor = findKey("vendedor", "comercial", "asesor");
+        const kGestorLead = findKey("gestor", "lead", "captador");
+        const kCliente = findKey("cliente", "nombre", "customer", "client");
+        const kMarca = findKey("marca", "brand");
+
+        if (!kPhone || !kDate) {
+          setErrorCitasCalendario('No he encontrado columnas de teléfono y fecha en el archivo. Revisa que tenga cabeceras como "Telefono" y "Fecha" (con la hora incluida, o en una columna "Hora" aparte).');
+          setSubiendoCitasCalendario(false);
+          return;
+        }
+
+        let creadas = 0, sinVendedor = 0, duplicadas = 0, sinHoraValida = 0, sinTelefono = 0;
+        const updates = {};
+
+        rows.forEach((r) => {
+          const telefonoOriginal = String(r[kPhone] || "").trim();
+          const phone = normalizePhone(telefonoOriginal);
+          if (!phone) {
+            sinTelefono += 1;
+            return;
+          }
+
+          const fecha = parseAnyDate(r[kDate]);
+          if (!fecha) {
+            sinHoraValida += 1;
+            return;
+          }
+
+          // Si hay una columna de Hora aparte, manda sobre la hora que traiga la propia Fecha.
+          const horaDeColumnaAparte = kHora ? horaDeCelda(r[kHora]) : null;
+          const horaExacta = horaDeColumnaAparte != null ? horaDeColumnaAparte : fecha.getHours() + fecha.getMinutes() / 60;
+
+          const diaSemana = (fecha.getDay() + 6) % 7; // convierte domingo=0 a lunes=0
+          if (diaSemana > 5 || horaExacta < HORA_INICIO || horaExacta >= HORA_FIN) {
+            sinHoraValida += 1;
+            return;
+          }
+
+          const hourSlot = Math.floor(horaExacta / (SLOT_MIN / 60)) * (SLOT_MIN / 60);
+          const weekKeyFila = fmtWeekKey(getMonday(fecha));
+
+          const yaExiste = todasLasCitas.some(
+            (c) =>
+              c.estado !== "cancelada" &&
+              normalizePhone(c.telefono) === phone &&
+              c.weekKey === weekKeyFila &&
+              c.day === diaSemana &&
+              c.hour === hourSlot
+          );
+          if (yaExiste) {
+            duplicadas += 1;
+            return;
+          }
+
+          const vendedorTexto = kVendedor ? String(r[kVendedor] || "").trim() : "";
+          const vendedorNombreCanonico = vendedorTexto ? emparejarNombrePersona(vendedorTexto, vendedores, "nombre") : null;
+          const vendedorObj = vendedorNombreCanonico ? vendedores.find((v) => v.nombre === vendedorNombreCanonico) : null;
+          if (vendedorTexto && !vendedorObj) sinVendedor += 1;
+
+          const gestorTexto = kGestorLead ? String(r[kGestorLead] || "").trim() : "";
+          const gestorNombreCanonico = gestorTexto ? emparejarNombrePersona(gestorTexto, gestores, "nombre") : null;
+          const gestorObj = gestorNombreCanonico ? gestores.find((g) => g.nombre === gestorNombreCanonico) : null;
+
+          const marcaTexto = kMarca ? String(r[kMarca] || "").trim() : "";
+          const marcaCanonica = MARCAS.find((m) => normalizarNombrePersona(m) === normalizarNombrePersona(marcaTexto));
+
+          const citaId = genId();
+          updates[`citas/${weekKeyFila}/${citaId}`] = {
+            vendorId: vendedorObj?.id || "",
+            day: diaSemana,
+            hour: hourSlot,
+            horaExacta,
+            cliente: kCliente ? String(r[kCliente] || "").trim() : "",
+            telefono: telefonoOriginal,
+            gestorId: gestorObj?.id || "",
+            marca: marcaCanonica || "",
+            estado: "activa",
+          };
+          creadas += 1;
+        });
+
+        if (creadas > 0) {
+          await update(ref(db), updates);
+        }
+
+        const resumen = [`${creadas} citas creadas`];
+        if (sinVendedor > 0) resumen.push(`${sinVendedor} sin vendedor reconocido (revísalas en la agenda)`);
+        if (duplicadas > 0) resumen.push(`${duplicadas} ya existían (omitidas)`);
+        if (sinHoraValida > 0) resumen.push(`${sinHoraValida} sin fecha/hora válida dentro del horario laboral`);
+        if (sinTelefono > 0) resumen.push(`${sinTelefono} sin teléfono`);
+        showToast(resumen.join(" · "));
+      } catch (e) {
+        console.error(e);
+        setErrorCitasCalendario("No he podido leer el archivo. Comprueba que sea un .xlsx o .csv válido.");
+      } finally {
+        setSubiendoCitasCalendario(false);
+      }
+    },
+    [todasLasCitas, vendedores, gestores, showToast]
   );
 
   // ---------- Leads sin cita (presupuesto / derivados directamente a vendedor) ----------
@@ -3091,6 +3238,22 @@ export default function AgendaVendedores() {
           )}
           {errorCotejo && <div style={styles.noVendorWarn}>{errorCotejo}</div>}
 
+          <div style={{ ...styles.panelTitle, marginTop: 30 }}>Importar citas al calendario</div>
+          <div style={styles.panelHint}>
+            A diferencia de los dos listados de arriba (que solo alimentan el informe), esto crea citas reales en la agenda. Necesita columnas de Teléfono y Fecha (con la hora incluida, o en una columna "Hora" aparte); opcionalmente Vendedor, Gestor lead, Cliente y Marca. Si el vendedor no se reconoce, la cita se crea igualmente sin asignar, para revisarla en la agenda. No duplica citas si el mismo teléfono ya tiene una cita en esa misma fecha y franja.
+          </div>
+          <input
+            ref={fileInputCitasCalendarioRef}
+            type="file"
+            accept=".xlsx,.xls,.csv"
+            style={{ display: "none" }}
+            onChange={(e) => handleImportarCitasAlCalendario(e.target.files?.[0])}
+          />
+          <button onClick={() => fileInputCitasCalendarioRef.current?.click()} disabled={subiendoCitasCalendario} style={styles.warnBtn}>
+            <Upload size={14} /> {subiendoCitasCalendario ? "Leyendo e importando…" : "Importar citas desde Excel"}
+          </button>
+          {errorCitasCalendario && <div style={{ ...styles.noVendorWarn, marginTop: 10 }}>{errorCitasCalendario}</div>}
+
           {hayVentasCargadas && (
             <>
               <div style={{ ...styles.panelTitle, marginTop: 30, fontSize: 15 }}>
@@ -3479,15 +3642,15 @@ export default function AgendaVendedores() {
                     <div key={dayIdx} style={styles.agendaCell}>
                       {citasSlot.map((c) => {
                         const v = vendedores.find((vv) => vv.id === c.vendorId);
-                        if (!v) return null;
                         const g = gestores.find((gg) => gg.id === c.gestorId);
-                        const colorV = colorParaSede(v.isla, v.sede);
+                        const colorV = v ? colorParaSede(v.isla, v.sede) : { bg: "#F1EAD9", border: "#A89B7E", text: "#5C5240" };
                         const vendida = citasConVenta.has(c.id);
                         const noAsistio = c.asistio === false;
-                        const fueraDeFiltro = !vendedoresFiltrados.some((vf) => vf.id === v.id);
+                        const fueraDeFiltro = v ? !vendedoresFiltrados.some((vf) => vf.id === v.id) : false;
                         // La hora exacta solo se muestra si es distinta a la hora en punto de la
                         // franja (que ya se ve en la columna de la izquierda), para no repetir.
                         const horaExactaLabel = c.horaExacta != null && c.horaExacta !== h ? horaLabel(c.horaExacta) : null;
+                        const nombreMostrado = v ? v.nombre.split(" ")[0] : "Sin asignar";
                         return (
                           <button
                             key={c.id}
@@ -3498,18 +3661,20 @@ export default function AgendaVendedores() {
                               borderColor: colorV.border,
                               color: colorV.text,
                               opacity: fueraDeFiltro ? 0.4 : noAsistio ? 0.6 : 1,
+                              ...(!v ? { borderStyle: "dashed" } : {}),
                             }}
-                            title={`${horaExactaLabel ? horaExactaLabel + " · " : ""}${v.nombre}${c.cliente ? " · " + c.cliente : ""}${c.telefono ? " · " + c.telefono : ""}${g ? " · Gestor: " + g.nombre : ""}${c.marca ? " · " + c.marca : ""}${noAsistio ? " · No asistió" : c.asistio === true ? " · Asistió" : ""}`}
+                            title={`${horaExactaLabel ? horaExactaLabel + " · " : ""}${v ? v.nombre : "Sin vendedor asignado"}${c.cliente ? " · " + c.cliente : ""}${c.telefono ? " · " + c.telefono : ""}${g ? " · Gestor: " + g.nombre : ""}${c.marca ? " · " + c.marca : ""}${noAsistio ? " · No asistió" : c.asistio === true ? " · Asistió" : ""}`}
                           >
                             <span style={{ ...styles.citaDot, background: colorV.border }} />
                             {c.marca && <span style={{ ...styles.citaDot, background: colorParaMarca(c.marca).border }} />}
                             <span style={styles.citaChipTextWrap}>
                               <span style={styles.citaChipText}>
                                 {horaExactaLabel && <strong>{horaExactaLabel} </strong>}
-                                {v.nombre.split(" ")[0]}{c.cliente ? ` · ${c.cliente}` : ""}
+                                {nombreMostrado}{c.cliente ? ` · ${c.cliente}` : ""}
                               </span>
                               {g && <span style={styles.citaChipGestor}>Gestor: {g.nombre}</span>}
                               {noAsistio && <span style={styles.citaChipNoAsistio}>No asistió</span>}
+                              {!v && <span style={styles.citaChipNoAsistio}>Sin vendedor</span>}
                             </span>
                             {vendida && <Check size={11} color="#4F9B72" style={{ flexShrink: 0 }} />}
                           </button>
@@ -4170,7 +4335,7 @@ function CitaModal({ modalCita, vendedores, gestores, vendoresDisponibles, suger
             <div style={styles.modalTitle}>
               {isEdit ? (cancelada ? "Cita cancelada" : "Editar cita") : "Nueva cita"}
             </div>
-            <div style={styles.modalSub}>{dias[day]} · franja {horaLabel(hour)}-{horaLabel(hour + 0.5)}</div>
+            <div style={styles.modalSub}>{dias[day]} · franja {horaLabel(hour)}-{horaLabel(hour + SLOT_MIN / 60)}</div>
           </div>
           <button onClick={onClose} style={styles.iconBtn} aria-label="Cerrar">
             <X size={18} />
@@ -4354,8 +4519,9 @@ function CitaModal({ modalCita, vendedores, gestores, vendoresDisponibles, suger
                 setErrorHoraExacta("Escribe una hora válida (HH:MM).");
                 return;
               }
-              if (horaExactaDecimal < hour || horaExactaDecimal >= hour + 0.5) {
-                setErrorHoraExacta(`La hora debe estar entre ${horaLabel(hour)} y ${horaLabel(hour + 0.5)} (la franja de esta cita). Para otra franja, ciérrala y pulsa "+" en la casilla correcta.`);
+              const anchoFranja = SLOT_MIN / 60;
+              if (horaExactaDecimal < hour || horaExactaDecimal >= hour + anchoFranja) {
+                setErrorHoraExacta(`La hora debe estar entre ${horaLabel(hour)} y ${horaLabel(hour + anchoFranja)} (la franja de esta cita). Para otra franja, ciérrala y pulsa "+" en la casilla correcta.`);
                 return;
               }
               onSave(vendorId, day, hour, cliente, telefono, isEdit ? existing.id : null, gestorId, marca, horaExactaDecimal);

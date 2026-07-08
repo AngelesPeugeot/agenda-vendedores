@@ -2303,6 +2303,7 @@ export default function AgendaVendedores() {
   const [informeFiltroVendedor, setInformeFiltroVendedor] = useState("");
   const [vistaGraficoMensual, setVistaGraficoMensual] = useState("total");
   const [vendedorLeyendaExpandido, setVendedorLeyendaExpandido] = useState(null);
+  const [avisoDatosExpandido, setAvisoDatosExpandido] = useState(null); // "gestor" | "vendedor" | null
 
   const hayFiltrosInformeActivos =
     informeFiltroMesAnio || informeFiltroDesde || informeFiltroHasta || informeFiltroMarca || informeFiltroGestor || informeFiltroVendedor;
@@ -2379,9 +2380,12 @@ export default function AgendaVendedores() {
     const porMarca = agrupar("marca");
 
     // Calidad de los datos: cuántos registros no tienen gestor o vendedor asignado,
-    // para detectar huecos de información de un vistazo.
-    const sinGestor = registrosUnicos.filter((r) => !r.gestorLead || !r.gestorLead.trim()).length;
-    const sinVendedor = registrosUnicos.filter((r) => !r.vendedor || !r.vendedor.trim()).length;
+    // para detectar huecos de información de un vistazo. Se guardan también los registros
+    // concretos (no solo el conteo) para poder mostrar el detalle de cuáles son.
+    const registrosSinGestor = registrosUnicos.filter((r) => !r.gestorLead || !r.gestorLead.trim());
+    const registrosSinVendedor = registrosUnicos.filter((r) => !r.vendedor || !r.vendedor.trim());
+    const sinGestor = registrosSinGestor.length;
+    const sinVendedor = registrosSinVendedor.length;
 
     // Islas presentes en el conjunto filtrado, para las series del gráfico mensual por isla.
     const islasPresentes = Array.from(new Set(registrosUnicos.map((r) => (r.isla || "").trim()).filter(Boolean))).sort();
@@ -2425,6 +2429,8 @@ export default function AgendaVendedores() {
       tasaConversion,
       sinGestor,
       sinVendedor,
+      registrosSinGestor,
+      registrosSinVendedor,
       porVendedor,
       porGestorLead,
       porIsla,
@@ -2485,6 +2491,50 @@ export default function AgendaVendedores() {
 
     return { total: citasMarcadas.length, asistieron, noAsistieron, tasa, porVendedor };
   }, [todasLasCitas, vendedores, gestores, informeFiltroMesAnio, informeFiltroDesde, informeFiltroHasta, informeFiltroMarca, informeFiltroGestor, informeFiltroVendedor]);
+
+  // Citas totales, visitas (asistieron) y ventas por gestor lead, respetando los mismos
+  // filtros del informe. A diferencia de resumenAsistencia, aquí SÍ se cuentan todas las citas
+  // del periodo (no solo las que ya tienen marcada la asistencia), para ver de un vistazo cuánto
+  // trabajo genera cada gestor y qué proporción se convierte en visita real y en venta.
+  const resumenPorGestorMes = useMemo(() => {
+    const citasFiltradas = todasLasCitas.filter((c) => {
+      if (c.estado === "cancelada") return false;
+      const v = vendedores.find((vv) => vv.id === c.vendorId);
+      const g = gestores.find((gg) => gg.id === c.gestorId);
+      const vendedorNombre = v?.nombre || "";
+      const gestorNombre = g?.nombre || "";
+      const fecha = fechaDeCitaSemana(c.weekKey, c.day);
+      const mesAnio = fecha ? `${fecha.getFullYear()}-${String(fecha.getMonth() + 1).padStart(2, "0")}` : "";
+      if (informeFiltroMesAnio && mesAnio !== informeFiltroMesAnio) return false;
+      if (informeFiltroDesde && (!fecha || fecha < new Date(informeFiltroDesde))) return false;
+      if (informeFiltroHasta) {
+        const hasta = new Date(informeFiltroHasta);
+        hasta.setHours(23, 59, 59, 999);
+        if (!fecha || fecha > hasta) return false;
+      }
+      if (informeFiltroMarca && c.marca !== informeFiltroMarca) return false;
+      if (informeFiltroGestor && gestorNombre !== informeFiltroGestor) return false;
+      if (informeFiltroVendedor && vendedorNombre !== informeFiltroVendedor) return false;
+      return true;
+    });
+
+    if (citasFiltradas.length === 0) return [];
+
+    const map = {};
+    citasFiltradas.forEach((c) => {
+      const g = gestores.find((gg) => gg.id === c.gestorId);
+      const nombre = g?.nombre || "Sin gestor";
+      if (!map[nombre]) map[nombre] = { citas: 0, visitas: 0, ventas: 0 };
+      map[nombre].citas += 1;
+      if (c.asistio === true) map[nombre].visitas += 1;
+      const matches = c.telefono ? ventasParaTelefono(c.telefono) : [];
+      if (matches.length > 0 && esVendida(matches)) map[nombre].ventas += 1;
+    });
+
+    return Object.entries(map)
+      .map(([nombre, d]) => ({ nombre, ...d }))
+      .sort((a, b) => b.citas - a.citas);
+  }, [todasLasCitas, vendedores, gestores, ventasParaTelefono, esVendida, informeFiltroMesAnio, informeFiltroDesde, informeFiltroHasta, informeFiltroMarca, informeFiltroGestor, informeFiltroVendedor]);
 
   // Exporta el informe (ya filtrado) a un Excel con varias hojas: resumen, desgloses y detalle.
   const handleExportarInforme = useCallback(() => {
@@ -3503,11 +3553,53 @@ export default function AgendaVendedores() {
                   </div>
 
                   {(resumenVentas.sinGestor > 0 || resumenVentas.sinVendedor > 0) && (
-                    <div style={styles.informeAvisoDatos}>
-                      <AlertCircle size={13} />
-                      {resumenVentas.sinGestor > 0 && <span>{resumenVentas.sinGestor} sin gestor lead asignado</span>}
-                      {resumenVentas.sinGestor > 0 && resumenVentas.sinVendedor > 0 && <span> · </span>}
-                      {resumenVentas.sinVendedor > 0 && <span>{resumenVentas.sinVendedor} sin vendedor asignado</span>}
+                    <div style={styles.informeAvisoDatosWrap}>
+                      {resumenVentas.sinVendedor > 0 && (
+                        <div>
+                          <button
+                            onClick={() => setAvisoDatosExpandido(avisoDatosExpandido === "vendedor" ? null : "vendedor")}
+                            style={styles.informeAvisoDatosBtn}
+                          >
+                            <AlertCircle size={13} />
+                            <span>{resumenVentas.sinVendedor} sin vendedor asignado</span>
+                            <ChevronDown size={12} style={{ transform: avisoDatosExpandido === "vendedor" ? "none" : "rotate(-90deg)" }} />
+                          </button>
+                          {avisoDatosExpandido === "vendedor" && (
+                            <div style={styles.informeDetalleWrap}>
+                              {resumenVentas.registrosSinVendedor.map((r, i) => (
+                                <div key={i} style={styles.informeDetalleRow}>
+                                  <span style={styles.informeDetalleNombre}>{r.cliente || "Sin nombre"}</span>
+                                  <span style={styles.informeDetallePhone}>{r.phone || "—"}</span>
+                                  <span style={styles.informeDetalleMes}>{r.mesAnio ? mesAnioLabel(r.mesAnio) : "—"}</span>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      )}
+                      {resumenVentas.sinGestor > 0 && (
+                        <div>
+                          <button
+                            onClick={() => setAvisoDatosExpandido(avisoDatosExpandido === "gestor" ? null : "gestor")}
+                            style={styles.informeAvisoDatosBtn}
+                          >
+                            <AlertCircle size={13} />
+                            <span>{resumenVentas.sinGestor} sin gestor lead asignado</span>
+                            <ChevronDown size={12} style={{ transform: avisoDatosExpandido === "gestor" ? "none" : "rotate(-90deg)" }} />
+                          </button>
+                          {avisoDatosExpandido === "gestor" && (
+                            <div style={styles.informeDetalleWrap}>
+                              {resumenVentas.registrosSinGestor.map((r, i) => (
+                                <div key={i} style={styles.informeDetalleRow}>
+                                  <span style={styles.informeDetalleNombre}>{r.cliente || "Sin nombre"}</span>
+                                  <span style={styles.informeDetallePhone}>{r.phone || "—"}</span>
+                                  <span style={styles.informeDetalleMes}>{r.mesAnio ? mesAnioLabel(r.mesAnio) : "—"}</span>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      )}
                     </div>
                   )}
 
@@ -3560,6 +3652,31 @@ export default function AgendaVendedores() {
                           </div>
                         </div>
                       )}
+                    </div>
+                  )}
+
+                  {resumenPorGestorMes.length > 0 && (
+                    <div style={styles.informeChartWrap}>
+                      <div style={styles.informeTablaTitulo}>Citas, visitas y ventas por gestor</div>
+                      <div style={styles.panelHint}>
+                        Citas: todas las creadas por ese gestor en el periodo filtrado. Visitas: las marcadas como "Asistió". Ventas: las que aparecen como vendidas en tus listados.
+                      </div>
+                      <div style={styles.gestorTablaHeader}>
+                        <span style={styles.informeTablaNombre}>Gestor</span>
+                        <span style={styles.gestorTablaCol}>Citas</span>
+                        <span style={styles.gestorTablaCol}>Visitas</span>
+                        <span style={styles.gestorTablaCol}>Ventas</span>
+                      </div>
+                      <div style={styles.informeTablaRows}>
+                        {resumenPorGestorMes.map((f) => (
+                          <div key={f.nombre} style={styles.gestorTablaRow}>
+                            <span style={styles.informeTablaNombre}>{f.nombre}</span>
+                            <span style={styles.gestorTablaCol}>{f.citas}</span>
+                            <span style={{ ...styles.gestorTablaCol, color: "#2F5E3F", fontWeight: 600 }}>{f.visitas}</span>
+                            <span style={{ ...styles.gestorTablaCol, color: "#C45A2E", fontWeight: 600 }}>{f.ventas}</span>
+                          </div>
+                        ))}
+                      </div>
                     </div>
                   )}
 
@@ -4803,6 +4920,8 @@ const styles = {
   informeFiltroLabel: { fontSize: 12, color: "#8A7B5C", fontWeight: 500 },
   informeChartWrap: { background: "#fff", border: "1px solid #EBE4D3", borderRadius: 10, padding: "16px 18px", marginBottom: 26, maxWidth: 700 },
   informeAvisoDatos: { display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: "#A14B2C", background: "#FBEDE6", padding: "7px 11px", borderRadius: 8, marginBottom: 18, maxWidth: 600 },
+  informeAvisoDatosWrap: { display: "flex", flexDirection: "column", gap: 6, marginBottom: 18, maxWidth: 600 },
+  informeAvisoDatosBtn: { display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: "#A14B2C", background: "#FBEDE6", padding: "7px 11px", borderRadius: 8, border: "none", width: "100%", cursor: "pointer", textAlign: "left" },
   informeDuplicadosWrap: { marginBottom: 26, maxWidth: 600, background: "#FBF1DE", border: "1px solid #E8D2A8", borderRadius: 10, padding: "14px 16px" },
   informeDuplicadoGrupo: { display: "flex", alignItems: "center", gap: 10, background: "#fff", borderRadius: 8, padding: "9px 12px", marginTop: 8 },
   informeDuplicadoItem: { fontSize: 12, color: "#5C5240" },
@@ -4811,6 +4930,9 @@ const styles = {
   informeOrdenBtn: { border: "none", background: "transparent", color: "#7A6B4C", fontSize: 11, fontWeight: 500, padding: "4px 9px", borderRadius: 5 },
   informeOrdenBtnActive: { border: "none", background: "#FFFFFF", color: "#C45A2E", fontSize: 11, fontWeight: 600, padding: "4px 9px", borderRadius: 5, boxShadow: "0 1px 2px rgba(0,0,0,0.06)" },
   informeTablaRows: { display: "flex", flexDirection: "column", gap: 7 },
+  gestorTablaHeader: { display: "flex", gap: 8, marginBottom: 6, paddingBottom: 4, borderBottom: "1px solid #EFE9DA" },
+  gestorTablaCol: { fontSize: 11.5, fontWeight: 600, color: "#8A7B5C", width: 55, textAlign: "right" },
+  gestorTablaRow: { display: "flex", alignItems: "center", gap: 8 },
   informeTablaRow: { display: "flex", alignItems: "center", gap: 8 },
   informeTablaRowBtn: { display: "flex", alignItems: "center", gap: 8, width: "100%", border: "none", background: "transparent", padding: "3px 0", cursor: "pointer", textAlign: "left" },
   informeTablaNombre: { fontSize: 12, width: 130, flexShrink: 0, color: "#5C5240", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },

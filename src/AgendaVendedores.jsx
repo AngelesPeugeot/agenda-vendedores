@@ -3720,6 +3720,7 @@ export default function AgendaVendedores() {
                         const colorSede = v ? colorParaSede(v.isla, v.sede) : null;
                         const vendida = citasConVenta.has(c.id);
                         const noAsistio = c.asistio === false;
+                        const siAsistio = c.asistio === true;
                         const fueraDeFiltro = v ? !vendedoresFiltrados.some((vf) => vf.id === v.id) : false;
                         // La hora exacta solo se muestra si es distinta a la hora en punto de la
                         // franja (que ya se ve en la columna de la izquierda), para no repetir.
@@ -3747,6 +3748,7 @@ export default function AgendaVendedores() {
                                 {nombreMostrado}{c.cliente ? ` · ${c.cliente}` : ""}
                               </span>
                               {g && <span style={styles.citaChipGestor}>Gestor: {g.nombre}</span>}
+                              {siAsistio && <span style={styles.citaChipAsistio}>Asistió</span>}
                               {noAsistio && <span style={styles.citaChipNoAsistio}>No asistió</span>}
                               {!v && <span style={styles.citaChipNoAsistio}>Sin vendedor</span>}
                             </span>
@@ -4768,6 +4770,7 @@ const styles = {
   citaChipTextWrap: { display: "flex", flexDirection: "column", overflow: "hidden", flex: 1, minWidth: 0 },
   citaChipGestor: { fontSize: 9, fontWeight: 500, opacity: 0.75, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
   citaChipNoAsistio: { fontSize: 9, fontWeight: 700, color: "#A14B2C", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
+  citaChipAsistio: { fontSize: 9, fontWeight: 700, color: "#2F5E3F", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
 
   legendTitulo: { marginTop: 20, fontSize: 12, fontWeight: 600, color: "#7A6B4C" },
   legend: { marginTop: 8, display: "flex", flexDirection: "column", gap: 7, maxWidth: 500 },

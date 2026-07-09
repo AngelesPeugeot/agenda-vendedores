@@ -3989,6 +3989,15 @@ export default function AgendaVendedores() {
             vendedoresPorSede.map(({ sede, vendedores: listaVendedores }) => (
               <div key={sede} style={styles.sedeGrupoWrap}>
                 <div style={styles.sedeGrupoTitulo}>{sede}</div>
+                <div style={styles.sedeTablaHeader}>
+                  <span style={{ width: 9, flexShrink: 0 }} />
+                  <span style={styles.sedeVendedorNombre}>Vendedor</span>
+                  <span style={styles.sedeTablaCol}>Citas</span>
+                  <span style={styles.sedeTablaCol}>Visitas</span>
+                  <span style={styles.sedeTablaCol}>No acude</span>
+                  <span style={styles.sedeTablaCol}>Ventas</span>
+                  <span style={{ width: 13, flexShrink: 0 }} />
+                </div>
                 {listaVendedores.map((v) => {
                   const c = colorParaSede(v.isla, v.sede);
                   const deVacaciones = vendedoresDeVacacionesEstaSemana.has(v.id);
@@ -4002,11 +4011,14 @@ export default function AgendaVendedores() {
                         style={{ ...styles.sedeVendedorRow, opacity: deVacaciones ? 0.55 : 1 }}
                       >
                         <span style={{ ...styles.vendorDot, background: c.border }} />
-                        <span style={styles.sedeVendedorNombre}>{v.nombre}</span>
-                        {deVacaciones && <span style={styles.legendVacacionesTag}>De vacaciones</span>}
-                        <span style={styles.sedeVendedorStats}>
-                          {stats.citas} {stats.citas === 1 ? "cita" : "citas"}, {stats.visitas} {stats.visitas === 1 ? "visita" : "visitas"}, {stats.noAcude} no acude, {stats.ventas} {stats.ventas === 1 ? "venta" : "ventas"}
+                        <span style={styles.sedeVendedorNombre}>
+                          {v.nombre}
+                          {deVacaciones && <span style={styles.legendVacacionesTagInline}>De vacaciones</span>}
                         </span>
+                        <span style={styles.sedeTablaCol}>{stats.citas}</span>
+                        <span style={styles.sedeTablaCol}>{stats.visitas}</span>
+                        <span style={{ ...styles.sedeTablaCol, color: stats.noAcude > 0 ? "#A14B2C" : "#8A7B5C" }}>{stats.noAcude}</span>
+                        <span style={{ ...styles.sedeTablaCol, color: stats.ventas > 0 ? "#2F5E3F" : "#8A7B5C", fontWeight: stats.ventas > 0 ? 700 : 400 }}>{stats.ventas}</span>
                         <ChevronDown size={13} style={{ transform: expandido ? "none" : "rotate(-90deg)", flexShrink: 0, color: "#A89B7E" }} />
                       </button>
                       {expandido && (
@@ -5022,9 +5034,11 @@ const styles = {
   legendBar: { display: "block", height: "100%", borderRadius: 4 },
   sedeGrupoWrap: { marginTop: 14 },
   sedeGrupoTitulo: { fontSize: 12.5, fontWeight: 700, color: "#3D362A", marginBottom: 6, paddingBottom: 3, borderBottom: "1px solid #E5E0D4" },
+  sedeTablaHeader: { display: "flex", alignItems: "center", gap: 8, marginBottom: 2, fontSize: 10.5, fontWeight: 700, color: "#A89B7E", textTransform: "uppercase", letterSpacing: 0.3 },
+  sedeTablaCol: { fontSize: 12.5, fontWeight: 600, color: "#5C5240", width: 70, textAlign: "right", flexShrink: 0 },
   sedeVendedorRow: { display: "flex", alignItems: "center", gap: 8, width: "100%", border: "none", background: "transparent", padding: "4px 0", cursor: "pointer", textAlign: "left" },
-  sedeVendedorNombre: { fontSize: 12.5, fontWeight: 600, color: "#3D362A", width: 130, flexShrink: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
-  sedeVendedorStats: { fontSize: 12, color: "#5C5240", flex: 1 },
+  sedeVendedorNombre: { fontSize: 12.5, fontWeight: 600, color: "#3D362A", flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
+  legendVacacionesTagInline: { fontSize: 9.5, fontWeight: 600, color: "#8A5E10", background: "#FBF1DE", padding: "1px 6px", borderRadius: 999, marginLeft: 7 },
   legendDetalleWrap: { display: "flex", flexDirection: "column", gap: 4, padding: "8px 10px 8px 18px", background: "#FFFEFB", borderRadius: 7, marginTop: 2, marginBottom: 6, border: "1px solid #EFE9DA" },
   legendDetalleRow: { display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" },
   legendDetalleFecha: { fontSize: 11, color: "#A89B7E", width: 90, flexShrink: 0 },

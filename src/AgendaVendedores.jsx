@@ -3986,18 +3986,19 @@ export default function AgendaVendedores() {
           {vendedoresPorSede.length === 0 ? (
             <div style={styles.panelHint}>Ningún vendedor coincide con el filtro de isla/sede seleccionado.</div>
           ) : (
-            vendedoresPorSede.map(({ sede, vendedores: listaVendedores }) => (
-              <div key={sede} style={styles.sedeGrupoWrap}>
-                <div style={styles.sedeGrupoTitulo}>{sede}</div>
-                <div style={styles.sedeTablaHeader}>
-                  <span style={{ width: 9, flexShrink: 0 }} />
-                  <span style={styles.sedeVendedorNombre}>Vendedor</span>
-                  <span style={styles.sedeTablaCol}>Citas</span>
-                  <span style={styles.sedeTablaCol}>Visitas</span>
-                  <span style={styles.sedeTablaCol}>No acude</span>
-                  <span style={styles.sedeTablaCol}>Ventas</span>
-                  <span style={{ width: 13, flexShrink: 0 }} />
-                </div>
+            <>
+              <div style={styles.sedeTablaHeader}>
+                <span style={{ width: 9, flexShrink: 0 }} />
+                <span style={styles.sedeVendedorNombre}>Vendedor</span>
+                <span style={styles.sedeTablaCol}>Citas</span>
+                <span style={styles.sedeTablaCol}>Visitas</span>
+                <span style={styles.sedeTablaCol}>No acude</span>
+                <span style={styles.sedeTablaCol}>Ventas</span>
+                <span style={{ width: 13, flexShrink: 0 }} />
+              </div>
+              {vendedoresPorSede.map(({ sede, vendedores: listaVendedores }) => (
+                <div key={sede} style={styles.sedeGrupoWrap}>
+                  <div style={styles.sedeGrupoTitulo}>{sede}</div>
                 {listaVendedores.map((v) => {
                   const c = colorParaSede(v.isla, v.sede);
                   const deVacaciones = vendedoresDeVacacionesEstaSemana.has(v.id);
@@ -4068,7 +4069,8 @@ export default function AgendaVendedores() {
                   );
                 })}
               </div>
-            ))
+              ))}
+            </>
           )}
         </div>
       )}

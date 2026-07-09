@@ -2097,20 +2097,40 @@ export default function AgendaVendedores() {
     return map;
   }, [todasLasCitas, weekDates]);
 
-  // Ventas y % de cierre por vendedor este mes: de todas sus citas del mes, cuántas aparecen
-  // como vendidas en los listados subidos. Mismo criterio de mes que citasDelMesPorVendedor.
-  const cierrePorVendedorMes = useMemo(() => {
+  // Estadísticas por vendedor este mes: citas totales, visitas (asistió), no acude (no
+  // asistió) y ventas (coinciden como vendidas en los listados subidos). Mismo criterio de mes
+  // que citasDelMesPorVendedor.
+  const statsPorVendedorMes = useMemo(() => {
     const map = {};
     Object.entries(citasDelMesPorVendedor).forEach(([vendorId, citasList]) => {
-      const ventas = citasList.filter((cita) => {
+      let visitas = 0, noAcude = 0, ventas = 0;
+      citasList.forEach((cita) => {
+        if (cita.asistio === true) visitas += 1;
+        if (cita.asistio === false) noAcude += 1;
         const matches = cita.telefono ? ventasParaTelefono(cita.telefono) : [];
-        return matches.length > 0 && esVendida(matches);
-      }).length;
-      const total = citasList.length;
-      map[vendorId] = { ventas, total, porcentaje: total > 0 ? Math.round((ventas / total) * 100) : 0 };
+        if (matches.length > 0 && esVendida(matches)) ventas += 1;
+      });
+      map[vendorId] = { citas: citasList.length, visitas, noAcude, ventas };
     });
     return map;
   }, [citasDelMesPorVendedor, ventasParaTelefono, esVendida]);
+
+  // Vendedores filtrados agrupados por sede y ordenados por número de citas este mes (el más
+  // activo primero dentro de cada sede), para el listado "Carga de citas este mes (por sede)".
+  const vendedoresPorSede = useMemo(() => {
+    const map = {};
+    vendedoresFiltrados.forEach((v) => {
+      const sede = v.sede || "Sin sede";
+      if (!map[sede]) map[sede] = [];
+      map[sede].push(v);
+    });
+    return Object.entries(map)
+      .map(([sede, lista]) => ({
+        sede,
+        vendedores: [...lista].sort((a, b) => (statsPorVendedorMes[b.id]?.citas || 0) - (statsPorVendedorMes[a.id]?.citas || 0)),
+      }))
+      .sort((a, b) => a.sede.localeCompare(b.sede));
+  }, [vendedoresFiltrados, statsPorVendedorMes]);
 
   // Vendedores con algún día de vacaciones dentro de la semana que se está viendo, para
   // avisar visualmente en la leyenda de la agenda aunque no ocupen ningún slot concreto.
@@ -3962,99 +3982,82 @@ export default function AgendaVendedores() {
           </div>
           </div>
 
-          <div style={styles.legendTitulo}>Carga de citas este mes (por vendedor)</div>
-          <div style={styles.legendTablaHeader}>
-            <span style={{ width: 9, flexShrink: 0 }} />
-            <span style={styles.legendName}>Vendedor</span>
-            <span style={styles.legendLocation}>Sede</span>
-            <span style={styles.legendBarWrap} />
-            <span style={styles.legendCount}>Citas</span>
-            <span style={styles.legendCierreCol}>% Cierre</span>
-            <span style={{ width: 13, flexShrink: 0 }} />
-          </div>
-          <div style={styles.legend}>
-            {vendedoresFiltrados.length === 0 ? (
-              <div style={styles.panelHint}>Ningún vendedor coincide con el filtro de isla/sede seleccionado.</div>
-            ) : (
-              vendedoresFiltrados.map((v) => {
-                const c = colorParaSede(v.isla, v.sede);
-                const deVacaciones = vendedoresDeVacacionesEstaSemana.has(v.id);
-                const expandido = vendedorLeyendaExpandido === v.id;
-                const citasDelMes = citasDelMesPorVendedor[v.id] || [];
-                const cierre = cierrePorVendedorMes[v.id];
-                return (
-                  <div key={v.id}>
-                    <button
-                      onClick={() => setVendedorLeyendaExpandido(expandido ? null : v.id)}
-                      style={{ ...styles.legendItemBtn, opacity: deVacaciones ? 0.55 : 1 }}
-                    >
-                      <span style={{ ...styles.vendorDot, background: c.border }} />
-                      <span style={styles.legendName}>{v.nombre}</span>
-                      <span style={styles.legendLocation}>{v.sede}</span>
-                      {deVacaciones && <span style={styles.legendVacacionesTag}>De vacaciones</span>}
-                      <span style={styles.legendBarWrap}>
-                        <span
-                          style={{
-                            ...styles.legendBar,
-                            width: `${Math.max(6, ((cargaPorVendedor[v.id] || 0) / maxCarga) * 100)}%`,
-                            background: c.border,
-                          }}
-                        />
-                      </span>
-                      <span style={styles.legendCount}>{cargaPorVendedor[v.id] || 0}</span>
-                      <span style={{ ...styles.legendCierreCol, color: cierre && cierre.porcentaje >= 20 ? "#2F5E3F" : "#8A7B5C", fontWeight: cierre && cierre.total > 0 ? 700 : 400 }}>
-                        {cierre && cierre.total > 0 ? `${cierre.porcentaje}%` : "—"}
-                      </span>
-                      <ChevronDown size={13} style={{ transform: expandido ? "none" : "rotate(-90deg)", flexShrink: 0, color: "#A89B7E" }} />
-                    </button>
-                    {expandido && (
-                      <div style={styles.legendDetalleWrap}>
-                        {citasDelMes.length === 0 ? (
-                          <div style={styles.panelHint}>Sin citas este mes.</div>
-                        ) : (
-                          <>
-                            <div style={styles.legendDetalleHeaderRow}>
-                              <span style={styles.legendDetalleFecha}>Fecha</span>
-                              <span style={styles.legendDetalleCliente}>Cliente</span>
-                              <span style={styles.legendDetalleGestor}>Gestor</span>
-                              <span style={styles.legendDetalleColEstado}>Asistencia</span>
-                              <span style={styles.legendDetalleColEstado}>Venta</span>
-                            </div>
-                            {citasDelMes.map((cita) => {
-                              const g = gestores.find((gg) => gg.id === cita.gestorId);
-                              const matches = cita.telefono ? ventasParaTelefono(cita.telefono) : [];
-                              const vendida = matches.length > 0 ? esVendida(matches) : null; // null = sin datos de venta
-                              return (
-                                <div key={cita.id} style={styles.legendDetalleRow}>
-                                  <span style={styles.legendDetalleFecha}>
-                                    {fmtDateShort(cita.fecha)} {horaLabel(cita.horaExacta != null ? cita.horaExacta : cita.hour)}
-                                  </span>
-                                  <span style={styles.legendDetalleCliente}>{cita.cliente || "Sin nombre"}</span>
-                                  <span style={styles.legendDetalleGestor}>{g ? g.nombre : "Sin gestor"}</span>
-                                  <span style={styles.legendDetalleColEstado}>
-                                    {cita.asistio === true && <span style={styles.citaChipAsistio}>Asistió</span>}
-                                    {cita.asistio === false && <span style={styles.citaChipNoAsistio}>No asistió</span>}
-                                    {cita.asistio == null && <span style={styles.pendienteTag}>—</span>}
-                                  </span>
-                                  <span style={styles.legendDetalleColEstado}>
-                                    {vendida === true && (
-                                      <span style={styles.vendidaTag}><Check size={11} /> Vendido</span>
-                                    )}
-                                    {vendida === false && <span style={styles.pendienteTagRojo}>No vendido</span>}
-                                    {vendida === null && <span style={styles.pendienteTag}>—</span>}
-                                  </span>
-                                </div>
-                              );
-                            })}
-                          </>
-                        )}
-                      </div>
-                    )}
-                  </div>
-                );
-              })
-            )}
-          </div>
+          <div style={styles.legendTitulo}>Carga de citas este mes (por sede)</div>
+          {vendedoresPorSede.length === 0 ? (
+            <div style={styles.panelHint}>Ningún vendedor coincide con el filtro de isla/sede seleccionado.</div>
+          ) : (
+            vendedoresPorSede.map(({ sede, vendedores: listaVendedores }) => (
+              <div key={sede} style={styles.sedeGrupoWrap}>
+                <div style={styles.sedeGrupoTitulo}>{sede}</div>
+                {listaVendedores.map((v) => {
+                  const c = colorParaSede(v.isla, v.sede);
+                  const deVacaciones = vendedoresDeVacacionesEstaSemana.has(v.id);
+                  const expandido = vendedorLeyendaExpandido === v.id;
+                  const citasDelMes = citasDelMesPorVendedor[v.id] || [];
+                  const stats = statsPorVendedorMes[v.id] || { citas: 0, visitas: 0, noAcude: 0, ventas: 0 };
+                  return (
+                    <div key={v.id}>
+                      <button
+                        onClick={() => setVendedorLeyendaExpandido(expandido ? null : v.id)}
+                        style={{ ...styles.sedeVendedorRow, opacity: deVacaciones ? 0.55 : 1 }}
+                      >
+                        <span style={{ ...styles.vendorDot, background: c.border }} />
+                        <span style={styles.sedeVendedorNombre}>{v.nombre}</span>
+                        {deVacaciones && <span style={styles.legendVacacionesTag}>De vacaciones</span>}
+                        <span style={styles.sedeVendedorStats}>
+                          {stats.citas} {stats.citas === 1 ? "cita" : "citas"}, {stats.visitas} {stats.visitas === 1 ? "visita" : "visitas"}, {stats.noAcude} no acude, {stats.ventas} {stats.ventas === 1 ? "venta" : "ventas"}
+                        </span>
+                        <ChevronDown size={13} style={{ transform: expandido ? "none" : "rotate(-90deg)", flexShrink: 0, color: "#A89B7E" }} />
+                      </button>
+                      {expandido && (
+                        <div style={styles.legendDetalleWrap}>
+                          {citasDelMes.length === 0 ? (
+                            <div style={styles.panelHint}>Sin citas este mes.</div>
+                          ) : (
+                            <>
+                              <div style={styles.legendDetalleHeaderRow}>
+                                <span style={styles.legendDetalleFecha}>Fecha</span>
+                                <span style={styles.legendDetalleCliente}>Cliente</span>
+                                <span style={styles.legendDetalleGestor}>Gestor</span>
+                                <span style={styles.legendDetalleColEstado}>Asistencia</span>
+                                <span style={styles.legendDetalleColEstado}>Venta</span>
+                              </div>
+                              {citasDelMes.map((cita) => {
+                                const g = gestores.find((gg) => gg.id === cita.gestorId);
+                                const matches = cita.telefono ? ventasParaTelefono(cita.telefono) : [];
+                                const vendida = matches.length > 0 ? esVendida(matches) : null; // null = sin datos de venta
+                                return (
+                                  <div key={cita.id} style={styles.legendDetalleRow}>
+                                    <span style={styles.legendDetalleFecha}>
+                                      {fmtDateShort(cita.fecha)} {horaLabel(cita.horaExacta != null ? cita.horaExacta : cita.hour)}
+                                    </span>
+                                    <span style={styles.legendDetalleCliente}>{cita.cliente || "Sin nombre"}</span>
+                                    <span style={styles.legendDetalleGestor}>{g ? g.nombre : "Sin gestor"}</span>
+                                    <span style={styles.legendDetalleColEstado}>
+                                      {cita.asistio === true && <span style={styles.citaChipAsistio}>Asistió</span>}
+                                      {cita.asistio === false && <span style={styles.citaChipNoAsistio}>No asistió</span>}
+                                      {cita.asistio == null && <span style={styles.pendienteTag}>—</span>}
+                                    </span>
+                                    <span style={styles.legendDetalleColEstado}>
+                                      {vendida === true && (
+                                        <span style={styles.vendidaTag}><Check size={11} /> Vendido</span>
+                                      )}
+                                      {vendida === false && <span style={styles.pendienteTagRojo}>No vendido</span>}
+                                      {vendida === null && <span style={styles.pendienteTag}>—</span>}
+                                    </span>
+                                  </div>
+                                );
+                              })}
+                            </>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            ))
+          )}
         </div>
       )}
 
@@ -5014,17 +5017,14 @@ const styles = {
   citaChipAsistio: { fontSize: 9, fontWeight: 700, color: "#2F5E3F", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
 
   legendTitulo: { marginTop: 20, fontSize: 12, fontWeight: 600, color: "#7A6B4C" },
-  legend: { marginTop: 4, display: "flex", flexDirection: "column", gap: 7, width: "100%" },
-  legendTablaHeader: { display: "flex", alignItems: "center", gap: 8, marginTop: 8, marginBottom: 2, paddingBottom: 4, borderBottom: "1px solid #EFE9DA", fontSize: 10.5, fontWeight: 700, color: "#A89B7E", textTransform: "uppercase", letterSpacing: 0.3 },
-  legendCierreCol: { fontSize: 12, fontWeight: 600, width: 60, textAlign: "right", flexShrink: 0 },
-  legendItem: { display: "flex", alignItems: "center", gap: 8 },
-  legendItemBtn: { display: "flex", alignItems: "center", gap: 8, width: "100%", border: "none", background: "transparent", padding: "3px 0", cursor: "pointer", textAlign: "left" },
-  legendName: { fontSize: 12, width: 100, flexShrink: 0, color: "#5C5240", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
-  legendLocation: { fontSize: 11, color: "#A89B7E", width: 90, flexShrink: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
   legendVacacionesTag: { fontSize: 10, fontWeight: 600, color: "#8A5E10", background: "#FBF1DE", padding: "2px 7px", borderRadius: 999, flexShrink: 0 },
   legendBarWrap: { flex: 1, height: 7, background: "#F1EAD9", borderRadius: 4, overflow: "hidden" },
   legendBar: { display: "block", height: "100%", borderRadius: 4 },
-  legendCount: { fontSize: 12, fontWeight: 600, width: 20, textAlign: "right", color: "#5C5240" },
+  sedeGrupoWrap: { marginTop: 14 },
+  sedeGrupoTitulo: { fontSize: 12.5, fontWeight: 700, color: "#3D362A", marginBottom: 6, paddingBottom: 3, borderBottom: "1px solid #E5E0D4" },
+  sedeVendedorRow: { display: "flex", alignItems: "center", gap: 8, width: "100%", border: "none", background: "transparent", padding: "4px 0", cursor: "pointer", textAlign: "left" },
+  sedeVendedorNombre: { fontSize: 12.5, fontWeight: 600, color: "#3D362A", width: 130, flexShrink: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
+  sedeVendedorStats: { fontSize: 12, color: "#5C5240", flex: 1 },
   legendDetalleWrap: { display: "flex", flexDirection: "column", gap: 4, padding: "8px 10px 8px 18px", background: "#FFFEFB", borderRadius: 7, marginTop: 2, marginBottom: 6, border: "1px solid #EFE9DA" },
   legendDetalleRow: { display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" },
   legendDetalleFecha: { fontSize: 11, color: "#A89B7E", width: 90, flexShrink: 0 },

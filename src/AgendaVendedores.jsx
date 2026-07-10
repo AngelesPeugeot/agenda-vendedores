@@ -1036,9 +1036,9 @@ export default function AgendaVendedores() {
   const [filtroMarcas, setFiltroMarcas] = useState([]);
   const [leadBusqueda, setLeadBusqueda] = useState("");
   const [leadFiltroEstado, setLeadFiltroEstado] = useState("todos");
-  const [leadFiltroGestorId, setLeadFiltroGestorId] = useState("");
-  const [leadFiltroIsla, setLeadFiltroIsla] = useState("");
-  const [leadFiltroMesAnio, setLeadFiltroMesAnio] = useState("");
+  const [leadFiltroGestorIds, setLeadFiltroGestorIds] = useState([]);
+  const [leadFiltroIslas, setLeadFiltroIslas] = useState([]);
+  const [leadFiltroMesAnios, setLeadFiltroMesAnios] = useState([]);
   const [leadAgruparPor, setLeadAgruparPor] = useState("mes");
   const [gruposLeadToggled, setGruposLeadToggled] = useState(() => new Set());
   const [formLeadAbierto, setFormLeadAbierto] = useState(false);
@@ -2026,9 +2026,9 @@ export default function AgendaVendedores() {
         const tel = (l.telefono || "").toLowerCase();
         if (!nombre.includes(busqueda) && !tel.includes(busqueda)) return false;
       }
-      if (leadFiltroGestorId && l.gestorId !== leadFiltroGestorId) return false;
-      if (leadFiltroIsla && l.isla !== leadFiltroIsla) return false;
-      if (leadFiltroMesAnio && l.mesAnio !== leadFiltroMesAnio) return false;
+      if (leadFiltroGestorIds.length > 0 && !leadFiltroGestorIds.includes(l.gestorId)) return false;
+      if (leadFiltroIslas.length > 0 && !leadFiltroIslas.includes(l.isla)) return false;
+      if (leadFiltroMesAnios.length > 0 && !leadFiltroMesAnios.includes(l.mesAnio)) return false;
       if (leadFiltroEstado !== "todos") {
         const matches = ventasParaTelefono(l.telefono);
         const vendido = resolverVendidoManualOAuto(l.estadoManual, matches, columnaEstadoExiste);
@@ -2037,7 +2037,7 @@ export default function AgendaVendedores() {
       }
       return true;
     });
-  }, [leadsSinCita, leadBusqueda, leadFiltroGestorId, leadFiltroIsla, leadFiltroMesAnio, leadFiltroEstado, ventasParaTelefono, todosLosRegistros]);
+  }, [leadsSinCita, leadBusqueda, leadFiltroGestorIds, leadFiltroIslas, leadFiltroMesAnios, leadFiltroEstado, ventasParaTelefono, todosLosRegistros]);
 
   // Agrupa los leads ya filtrados por mes o por gestor lead, para que la lista no se muestre
   // como un bloque interminable. Cada grupo se puede plegar/desplegar; por defecto solo el
@@ -2073,13 +2073,23 @@ export default function AgendaVendedores() {
   const limpiarFiltrosLeads = useCallback(() => {
     setLeadBusqueda("");
     setLeadFiltroEstado("todos");
-    setLeadFiltroGestorId("");
-    setLeadFiltroIsla("");
-    setLeadFiltroMesAnio("");
+    setLeadFiltroGestorIds([]);
+    setLeadFiltroIslas([]);
+    setLeadFiltroMesAnios([]);
+  }, []);
+
+  const toggleLeadFiltroGestor = useCallback((gestorId) => {
+    setLeadFiltroGestorIds((prev) => (prev.includes(gestorId) ? prev.filter((g) => g !== gestorId) : [...prev, gestorId]));
+  }, []);
+  const toggleLeadFiltroIsla = useCallback((isla) => {
+    setLeadFiltroIslas((prev) => (prev.includes(isla) ? prev.filter((i) => i !== isla) : [...prev, isla]));
+  }, []);
+  const toggleLeadFiltroMes = useCallback((mes) => {
+    setLeadFiltroMesAnios((prev) => (prev.includes(mes) ? prev.filter((m) => m !== mes) : [...prev, mes]));
   }, []);
 
   const hayFiltrosLeadsActivos =
-    leadBusqueda || leadFiltroEstado !== "todos" || leadFiltroGestorId || leadFiltroIsla || leadFiltroMesAnio;
+    leadBusqueda || leadFiltroEstado !== "todos" || leadFiltroGestorIds.length > 0 || leadFiltroIslas.length > 0 || leadFiltroMesAnios.length > 0;
 
   // Carga mensual por vendedor (no solo de la semana que se está viendo), para que la leyenda
   // de la agenda refleje el mismo criterio de equidad que usa la sugerencia de vendedor al
@@ -3025,18 +3035,22 @@ export default function AgendaVendedores() {
                     inputMode="tel"
                   />
                 </div>
-                <select value={nuevoLeadGestorId} onChange={(e) => setNuevoLeadGestorId(e.target.value)} style={styles.select}>
-                  <option value="">Gestor lead…</option>
-                  {gestores.map((g) => (
-                    <option key={g.id} value={g.id}>{g.nombre}</option>
-                  ))}
-                </select>
-                <select value={nuevoLeadVendorId} onChange={(e) => setNuevoLeadVendorId(e.target.value)} style={styles.select}>
-                  <option value="">Vendedor (opcional)…</option>
-                  {vendedores.map((v) => (
-                    <option key={v.id} value={v.id}>{v.nombre}</option>
-                  ))}
-                </select>
+                <ComboboxBuscable
+                  id="lead-gestor"
+                  opciones={gestores.map((g) => ({ id: g.id, label: g.nombre }))}
+                  valor={nuevoLeadGestorId}
+                  onCambiar={setNuevoLeadGestorId}
+                  placeholder="Gestor lead…"
+                  colorDe={(o) => colorParaGestor(o.id, gestoresOrdenadosPorId).border}
+                />
+                <ComboboxBuscable
+                  id="lead-vendedor"
+                  opciones={vendedores.map((v) => ({ id: v.id, label: v.nombre, isla: v.isla, sede: v.sede }))}
+                  valor={nuevoLeadVendorId}
+                  onCambiar={setNuevoLeadVendorId}
+                  placeholder="Vendedor (opcional)…"
+                  colorDe={(o) => colorParaSede(o.isla, o.sede).border}
+                />
                 <select
                   value={nuevoLeadIsla}
                   onChange={(e) => {
@@ -3091,30 +3105,44 @@ export default function AgendaVendedores() {
                 placeholder="Buscar por nombre o teléfono…"
                 style={{ ...styles.input, maxWidth: 220 }}
               />
-              <select value={leadFiltroEstado} onChange={(e) => setLeadFiltroEstado(e.target.value)} style={styles.selectSmall}>
-                <option value="todos">Todos los estados</option>
-                <option value="vendido">Vendido</option>
-                <option value="novendido">No vendido</option>
-                <option value="sinregistro">Sin venta registrada</option>
-              </select>
-              <select value={leadFiltroGestorId} onChange={(e) => setLeadFiltroGestorId(e.target.value)} style={styles.selectSmall}>
-                <option value="">Todos los gestores</option>
-                {gestores.map((g) => (
-                  <option key={g.id} value={g.id}>{g.nombre}</option>
+              <div style={styles.informeOrdenToggle}>
+                {[
+                  { valor: "todos", etiqueta: "Todos" },
+                  { valor: "vendido", etiqueta: "Vendido" },
+                  { valor: "novendido", etiqueta: "No vendido" },
+                  { valor: "sinregistro", etiqueta: "Sin venta" },
+                ].map((op) => (
+                  <button
+                    key={op.valor}
+                    onClick={() => setLeadFiltroEstado(op.valor)}
+                    style={leadFiltroEstado === op.valor ? styles.informeOrdenBtnActive : styles.informeOrdenBtn}
+                  >
+                    {op.etiqueta}
+                  </button>
                 ))}
-              </select>
-              <select value={leadFiltroIsla} onChange={(e) => setLeadFiltroIsla(e.target.value)} style={styles.selectSmall}>
-                <option value="">Todas las islas</option>
-                {ISLAS.map((isla) => (
-                  <option key={isla} value={isla}>{isla}</option>
-                ))}
-              </select>
-              <select value={leadFiltroMesAnio} onChange={(e) => setLeadFiltroMesAnio(e.target.value)} style={styles.selectSmall}>
-                <option value="">Todos los meses</option>
-                {mesesDisponiblesLeads.map((m) => (
-                  <option key={m} value={m}>{mesAnioLabel(m)}</option>
-                ))}
-              </select>
+              </div>
+              <FiltroDesplegable
+                etiqueta="Gestor"
+                opciones={gestores.map((g) => g.id)}
+                seleccionados={leadFiltroGestorIds}
+                onToggle={toggleLeadFiltroGestor}
+                colorDe={(gestorId) => colorParaGestor(gestorId, gestoresOrdenadosPorId).border}
+                etiquetaDe={(gestorId) => gestores.find((g) => g.id === gestorId)?.nombre || gestorId}
+              />
+              <FiltroDesplegable
+                etiqueta="Isla"
+                opciones={ISLAS}
+                seleccionados={leadFiltroIslas}
+                onToggle={toggleLeadFiltroIsla}
+                colorDe={(isla) => PALETA_ISLAS[isla]?.hue || "#5C5240"}
+              />
+              <FiltroDesplegable
+                etiqueta="Mes"
+                opciones={mesesDisponiblesLeads}
+                seleccionados={leadFiltroMesAnios}
+                onToggle={toggleLeadFiltroMes}
+                etiquetaDe={(mes) => mesAnioLabel(mes)}
+              />
               {hayFiltrosLeadsActivos && (
                 <button onClick={limpiarFiltrosLeads} style={styles.filterClear}>
                   <X size={11} /> Limpiar
@@ -3173,6 +3201,15 @@ export default function AgendaVendedores() {
             ) : (
               <>
                 <div style={styles.panelHint}>{leadsSinCitaFiltrados.length} de {leadsSinCita.length} clientes</div>
+                <div style={styles.leadTablaHeader}>
+                  <span style={styles.leadColCliente}>Cliente</span>
+                  <span style={styles.leadColTelefono}>Teléfono</span>
+                  <span style={styles.leadColGestor}>Gestor</span>
+                  <span style={styles.leadColVendedor}>Vendedor</span>
+                  <span style={styles.leadColMarca}>Marca</span>
+                  <span style={styles.leadColEstado}>Estado</span>
+                  <span style={styles.leadColAcciones}>Acciones</span>
+                </div>
                 {leadsAgrupados.map((grupo, i) => {
                   const defaultAbierto = i === 0;
                   const abierto = gruposLeadToggled.has(grupo.clave) ? !defaultAbierto : defaultAbierto;
@@ -3184,7 +3221,7 @@ export default function AgendaVendedores() {
                         <span style={styles.leadGrupoCount}>{grupo.leads.length}</span>
                       </button>
                       {abierto && (
-                        <div style={styles.vendorList}>
+                        <div>
                           {grupo.leads.map((l) => {
                             const v = vendedores.find((vv) => vv.id === l.vendorId);
                             const g = gestores.find((gg) => gg.id === l.gestorId);
@@ -3192,32 +3229,33 @@ export default function AgendaVendedores() {
                             const columnaEstadoExiste = todosLosRegistros.some((r) => r.vendido !== null && r.vendido !== undefined);
                             const vendido = resolverVendidoManualOAuto(l.estadoManual, matches, columnaEstadoExiste);
                             const esManual = l.estadoManual === true || l.estadoManual === false;
+                            const colorFila = vendido === true ? TOKENS.successBorder : vendido === false ? TOKENS.primary : TOKENS.borderInput;
                             return (
-                              <div key={l.id} style={{ ...styles.cotejoRow, borderLeftColor: vendido === true ? "#4F9B72" : vendido === false ? "#C45A2E" : "#E5E0D4" }}>
-                                <div style={{ flex: 1, minWidth: 0 }}>
-                                  <div style={styles.cotejoName}>
-                                    {l.cliente || "Cliente sin nombre"} <span style={styles.cotejoPhone}>{l.telefono}</span>
-                                  </div>
-                                  <div style={styles.cotejoMeta}>
-                                    {g?.nombre ? `Gestor: ${g.nombre}` : "Sin gestor"}
-                                    {v?.nombre ? ` · ${v.nombre}` : " · Sin vendedor"}
-                                    {l.isla ? ` · ${l.isla}` : ""}
-                                    {l.sede ? ` (${l.sede})` : ""}
-                                    {l.marca ? ` · ${l.marca}` : ""}
-                                    {leadAgruparPor === "gestor" && l.mesAnio ? ` · ${mesAnioLabel(l.mesAnio)}` : ""}
-                                  </div>
-                                </div>
-                                {vendido === true ? (
-                                  <div style={styles.vendidaTag}>
-                                    <Check size={12} /> Vendido
-                                    {!esManual && (matches[0]?.modelo ? ` · ${matches[0].modelo}` : matches[0]?.coche ? ` · ${matches[0].coche}` : "")}
-                                  </div>
-                                ) : vendido === false ? (
-                                  <div style={styles.pendienteTagRojo}>No vendido</div>
-                                ) : (
-                                  <div style={styles.pendienteTag}>Sin venta registrada</div>
-                                )}
-                                <div style={styles.leadEstadoManualBotones}>
+                              <div key={l.id} style={{ ...styles.leadTablaRow, borderLeftColor: colorFila }}>
+                                <span style={styles.leadColCliente} title={l.cliente || "Cliente sin nombre"}>
+                                  {l.cliente || "Cliente sin nombre"}
+                                </span>
+                                <span style={styles.leadColTelefono}>{l.telefono || "—"}</span>
+                                <span style={styles.leadColGestor} title={g?.nombre || "Sin gestor"}>
+                                  {g?.nombre || "Sin gestor"}
+                                </span>
+                                <span style={styles.leadColVendedor} title={v?.nombre || "Sin vendedor"}>
+                                  {v?.nombre || "Sin vendedor"}
+                                </span>
+                                <span style={styles.leadColMarca}>{l.marca || "—"}</span>
+                                <span style={styles.leadColEstado}>
+                                  {vendido === true ? (
+                                    <span style={styles.vendidaTag}>
+                                      <Check size={11} /> Vendido
+                                      {!esManual && (matches[0]?.modelo ? ` · ${matches[0].modelo}` : matches[0]?.coche ? ` · ${matches[0].coche}` : "")}
+                                    </span>
+                                  ) : vendido === false ? (
+                                    <span style={styles.pendienteTagRojo}>No vendido</span>
+                                  ) : (
+                                    <span style={styles.pendienteTag}>Sin venta registrada</span>
+                                  )}
+                                </span>
+                                <span style={styles.leadColAcciones}>
                                   <button
                                     onClick={() => handleSetEstadoManualLead(l.id, l.estadoManual === true ? null : true)}
                                     style={l.estadoManual === true ? styles.asistioBtnActive : styles.informeOrdenBtn}
@@ -3232,17 +3270,17 @@ export default function AgendaVendedores() {
                                   >
                                     <X size={11} />
                                   </button>
-                                </div>
-                                <button
-                                  onClick={() => handleAgendarDesdeLead(l)}
-                                  style={styles.agendarDesdeLeadBtn}
-                                  title={`Agendar una cita para ${l.cliente || "este cliente"}`}
-                                >
-                                  <CalendarPlus size={13} /> Agendar
-                                </button>
-                                <button onClick={() => handleRemoveLeadSinCita(l.id)} style={styles.iconBtn} aria-label={`Eliminar ${l.cliente}`}>
-                                  <Trash2 size={15} />
-                                </button>
+                                  <button
+                                    onClick={() => handleAgendarDesdeLead(l)}
+                                    style={styles.agendarDesdeLeadBtn}
+                                    title={`Agendar una cita para ${l.cliente || "este cliente"}`}
+                                  >
+                                    <CalendarPlus size={13} />
+                                  </button>
+                                  <button onClick={() => handleRemoveLeadSinCita(l.id)} style={styles.iconBtn} aria-label={`Eliminar ${l.cliente}`}>
+                                    <Trash2 size={14} />
+                                  </button>
+                                </span>
                               </div>
                             );
                           })}
@@ -4422,7 +4460,7 @@ function ComboboxBuscable({ id, opciones, valor, onCambiar, placeholder, colorDe
 // Sustituye a las hileras de chips: un botón muestra el nombre del filtro (y cuántas opciones
 // hay activas), y al pulsarlo despliega un panel con checkboxes para cada opción. Se cierra
 // solo al hacer clic fuera.
-function FiltroDesplegable({ etiqueta, icono: Icono, opciones, seleccionados, onToggle, colorDe }) {
+function FiltroDesplegable({ etiqueta, icono: Icono, opciones, seleccionados, onToggle, colorDe, etiquetaDe }) {
   const [abierto, setAbierto] = useState(false);
   const ref = useRef(null);
 
@@ -4458,7 +4496,7 @@ function FiltroDesplegable({ etiqueta, icono: Icono, opciones, seleccionados, on
               <label key={op} style={styles.filtroDesplegableOpcion}>
                 <input type="checkbox" checked={activo} onChange={() => onToggle(op)} style={styles.filtroDesplegableCheckbox} />
                 <span style={{ ...styles.filterDot, background: color }} />
-                <span>{op}</span>
+                <span>{etiquetaDe ? etiquetaDe(op) : op}</span>
               </label>
             );
           })}
@@ -5247,6 +5285,15 @@ const styles = {
   leadGrupoHeader: { display: "flex", alignItems: "center", gap: 8, width: "100%", border: "none", background: TOKENS.bgSubtle, padding: "9px 12px", borderRadius: 8, cursor: "pointer", marginBottom: 6 },
   leadGrupoTitulo: { fontSize: 13, fontWeight: 600, color: TOKENS.textBody, flex: 1, textAlign: "left" },
   leadGrupoCount: { fontSize: 11.5, fontWeight: 600, color: TOKENS.textSubtle, background: "#fff", padding: "2px 8px", borderRadius: 999 },
+  leadTablaHeader: { display: "flex", alignItems: "center", gap: 8, marginBottom: 6, paddingBottom: 5, paddingLeft: 13, borderBottom: `1px solid ${TOKENS.borderSubtle}`, fontSize: 10.5, fontWeight: 700, color: TOKENS.textSubtle, textTransform: "uppercase", letterSpacing: 0.3 },
+  leadTablaRow: { display: "flex", alignItems: "center", gap: 8, padding: "8px 10px", borderLeft: "3px solid", background: "#fff", borderRadius: 6, marginBottom: 4 },
+  leadColCliente: { fontSize: 12.5, fontWeight: 600, color: TOKENS.textDarkest, flex: 1, minWidth: 100, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
+  leadColTelefono: { fontSize: 12, color: TOKENS.textBody, width: 100, flexShrink: 0 },
+  leadColGestor: { fontSize: 12, color: TOKENS.textBody, width: 120, flexShrink: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
+  leadColVendedor: { fontSize: 12, color: TOKENS.textBody, width: 120, flexShrink: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
+  leadColMarca: { fontSize: 12, color: TOKENS.textBody, width: 90, flexShrink: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
+  leadColEstado: { width: 150, flexShrink: 0 },
+  leadColAcciones: { display: "flex", alignItems: "center", gap: 4, width: 130, flexShrink: 0, justifyContent: "flex-end" },
   leadFiltrosBar: { display: "flex", gap: 8, marginBottom: 16, flexWrap: "wrap", alignItems: "center", paddingTop: 14, borderTop: `1px solid ${TOKENS.borderSubtle}` },
   informeFiltrosPrincipales: { display: "flex", gap: 8, marginBottom: 4, flexWrap: "wrap", alignItems: "center" },
   selectDestacado: { border: `1.5px solid ${TOKENS.primary}`, background: "#fff", color: TOKENS.textPrimary, borderRadius: 9, padding: "8px 12px", fontSize: 13, fontWeight: 600, minWidth: 150 },
@@ -5425,7 +5472,6 @@ const styles = {
   vendidaTag: { display: "flex", alignItems: "center", gap: 4, fontSize: 11, fontWeight: 600, color: TOKENS.successText, background: TOKENS.successBg, padding: "4px 8px", borderRadius: 7, whiteSpace: "nowrap" },
   pendienteTag: { fontSize: 11, color: TOKENS.textPlaceholder, whiteSpace: "nowrap" },
   pendienteTagRojo: { fontSize: 11, fontWeight: 600, color: TOKENS.dangerText, whiteSpace: "nowrap" },
-  leadEstadoManualBotones: { display: "flex", gap: 3, flexShrink: 0 },
 
   phoneInputWrap: { display: "flex", alignItems: "center", gap: 7, border: `1px solid ${TOKENS.borderInput}`, borderRadius: 9, padding: "9px 12px", background: "#fff" },
   phoneInput: { flex: 1, border: "none", outline: "none", fontSize: 13.5, background: "transparent", color: TOKENS.textDarkest },

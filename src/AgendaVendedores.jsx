@@ -1816,15 +1816,25 @@ export default function AgendaVendedores() {
             return sigla || s;
           };
 
-          // Estados que cuentan como venta confirmada (p.ej. "Vendido", "Pedido" = reserva en curso).
-          // Vacío o estados intermedios (p.ej. "Presupuesto") se consideran "sin decidir todavía".
+          // Vendido = venta confirmada y matriculada de verdad. "Pedido" ya NO cuenta como
+          // vendido: es un coche encargado a fábrica que puede tardar semanas o meses en
+          // matricularse, así que se trata como un estado propio (ver esPedidoTexto), no como
+          // una venta ya cerrada. Vacío o estados intermedios (ej. "Presupuesto") = sin decidir.
           const esVendidoTexto = (val) => {
             if (val === true || val === 1) return true;
             const s = String(val ?? "").trim().toLowerCase();
             if (!s) return null; // sin dato: no afirmamos nada
-            if (["si", "sí", "vendido", "vendida", "pedido", "yes", "true", "1", "x"].includes(s)) return true;
+            if (["si", "sí", "vendido", "vendida", "yes", "true", "1", "x"].includes(s)) return true;
             if (["no", "perdido", "perdida", "cancelado", "cancelada", "no interesa", "pendiente", "false", "0"].includes(s)) return false;
-            return null; // estados intermedios desconocidos (ej. "Presupuesto"): no afirmamos nada
+            return null; // estados intermedios desconocidos (ej. "Presupuesto", "Pedido"): no afirmamos nada aquí
+          };
+
+          // Pedido: coche encargado a fábrica, pendiente de matricular. Es un estado aparte de
+          // "vendido", no un sinónimo — cuando se re-suba el Excel más adelante con CIERRE ya
+          // en "Vendido" para ese mismo teléfono, pasará a contar como venta real.
+          const esPedidoTexto = (val) => {
+            const s = String(val ?? "").trim().toLowerCase();
+            return s === "pedido";
           };
 
           const filasLeidas = rows.map((r) => {
@@ -1854,6 +1864,7 @@ export default function AgendaVendedores() {
               sede: kSede ? String(r[kSede] || "").trim() : "",
               cliente: kCliente ? String(r[kCliente] || "").trim() : "",
               vendido: kVendido ? esVendidoTexto(r[kVendido]) : null,
+              pedido: kVendido ? esPedidoTexto(r[kVendido]) : false,
               marca: marcaCanonica || marcaTexto,
               mesAnio,
             };
@@ -1980,6 +1991,16 @@ export default function AgendaVendedores() {
     },
     [todosLosRegistros]
   );
+
+  // Un cliente está "en pedido" si alguna de sus filas coincidentes en los listados de ventas
+  // tiene CIERRE = "Pedido" (coche encargado a fábrica, aún sin matricular) y ninguna de ellas
+  // se ha confirmado ya como vendida — en cuanto se re-suba el Excel con CIERRE en "Vendido"
+  // para ese mismo teléfono, pasará a contar como venta real y dejará de mostrarse como pedido.
+  const esPedido = useCallback((matches) => {
+    if (!matches || matches.length === 0) return false;
+    if (matches.some((m) => m.vendido === true)) return false;
+    return matches.some((m) => m.pedido === true);
+  }, []);
 
   // ---------- Navegación semana ----------
   const goWeek = useCallback((delta) => {
@@ -2453,6 +2474,9 @@ export default function AgendaVendedores() {
       : [];
     const totalVendidos = vendidos.length;
     const totalNoVendidos = noVendidos.length;
+    // Pedidos: coches encargados a fábrica, pendientes de matricular. No se restan de
+    // "sin decidir" porque son un estado propio, no una venta confirmada ni un "no vendido".
+    const totalPedidos = registrosUnicos.filter((r) => !esVendidaRecord(r) && r.vendido !== false && r.pedido === true).length;
     const totalSinDecidir = totalRegistros - totalVendidos - totalNoVendidos;
     const tasaConversion = totalRegistros > 0 ? Math.round((totalVendidos / totalRegistros) * 100) : 0;
 
@@ -2530,6 +2554,7 @@ export default function AgendaVendedores() {
       totalVendidos,
       totalNoVendidos,
       totalSinDecidir,
+      totalPedidos,
       datosDonut,
       tasaConversion,
       sinGestor,
@@ -3228,8 +3253,9 @@ export default function AgendaVendedores() {
                             const matches = ventasParaTelefono(l.telefono);
                             const columnaEstadoExiste = todosLosRegistros.some((r) => r.vendido !== null && r.vendido !== undefined);
                             const vendido = resolverVendidoManualOAuto(l.estadoManual, matches, columnaEstadoExiste);
+                            const enPedido = vendido == null && esPedido(matches);
                             const esManual = l.estadoManual === true || l.estadoManual === false;
-                            const colorFila = vendido === true ? TOKENS.successBorder : vendido === false ? TOKENS.primary : TOKENS.borderInput;
+                            const colorFila = vendido === true ? TOKENS.successBorder : vendido === false ? TOKENS.primary : enPedido ? TOKENS.warningText : TOKENS.borderInput;
                             return (
                               <div key={l.id} style={{ ...styles.leadTablaRow, borderLeftColor: colorFila }}>
                                 <span style={styles.leadColCliente} title={l.cliente || "Cliente sin nombre"}>
@@ -3251,6 +3277,8 @@ export default function AgendaVendedores() {
                                     </span>
                                   ) : vendido === false ? (
                                     <span style={styles.pendienteTagRojo}>No vendido</span>
+                                  ) : enPedido ? (
+                                    <span style={styles.pedidoTag}>Pedido · pendiente de matricular</span>
                                   ) : (
                                     <span style={styles.pendienteTag}>Sin venta registrada</span>
                                   )}
@@ -3664,6 +3692,12 @@ export default function AgendaVendedores() {
                           <div style={styles.informeStatCard}>
                             <div style={styles.informeStatNumber}>{resumenVentas.totalNoVendidos}</div>
                             <div style={styles.informeStatLabel}>No vendidos</div>
+                          </div>
+                        )}
+                        {resumenVentas.totalPedidos > 0 && (
+                          <div style={{ ...styles.informeStatCard, borderColor: TOKENS.warningText }}>
+                            <div style={{ ...styles.informeStatNumber, color: TOKENS.warningText }}>{resumenVentas.totalPedidos}</div>
+                            <div style={styles.informeStatLabel}>Pedidos (pendientes de matricular)</div>
                           </div>
                         )}
                         <div style={styles.informeStatCard}>
@@ -4645,6 +4679,8 @@ function InformeTabla({ titulo, filas, usarGrafico }) {
                         <span style={styles.vendidaTag}><Check size={11} /> Vendido</span>
                       ) : r.vendido === false ? (
                         <span style={styles.pendienteTag}>No vendido</span>
+                      ) : r.pedido === true ? (
+                        <span style={styles.pedidoTag}>Pedido</span>
                       ) : (
                         <span style={styles.pendienteTag}>Sin decidir</span>
                       )}
@@ -5470,6 +5506,7 @@ const styles = {
   cotejoPhone: { fontSize: 11.5, color: TOKENS.textPlaceholder, fontWeight: 400 },
   cotejoMeta: { fontSize: 11.5, color: TOKENS.textSubtle, marginTop: 1 },
   vendidaTag: { display: "flex", alignItems: "center", gap: 4, fontSize: 11, fontWeight: 600, color: TOKENS.successText, background: TOKENS.successBg, padding: "4px 8px", borderRadius: 7, whiteSpace: "nowrap" },
+  pedidoTag: { display: "flex", alignItems: "center", gap: 4, fontSize: 11, fontWeight: 600, color: TOKENS.warningText, background: TOKENS.warningBg, padding: "4px 8px", borderRadius: 7, whiteSpace: "nowrap" },
   pendienteTag: { fontSize: 11, color: TOKENS.textPlaceholder, whiteSpace: "nowrap" },
   pendienteTagRojo: { fontSize: 11, fontWeight: 600, color: TOKENS.dangerText, whiteSpace: "nowrap" },
 

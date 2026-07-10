@@ -14,6 +14,7 @@ import {
   Clock,
   Users,
   Calendar,
+  CalendarPlus,
   ChevronLeft,
   ChevronRight,
   ChevronDown,
@@ -1000,6 +1001,7 @@ export default function AgendaVendedores() {
     return () => document.removeEventListener("mousedown", cerrarSiFuera);
   }, [gestionMenuAbierto]);
   const [modalCita, setModalCita] = useState(null);
+  const [leadParaAgendar, setLeadParaAgendar] = useState(null); // lead de "Sin cita" que se está convirtiendo en cita
   const [nuevoVendedorNombre, setNuevoVendedorNombre] = useState("");
   const [nuevoVendedorIsla, setNuevoVendedorIsla] = useState(ISLAS[0]);
   const [nuevoVendedorSede, setNuevoVendedorSede] = useState((ISLAS_SEDES[ISLAS[0]] || [])[0] || "");
@@ -1399,6 +1401,23 @@ export default function AgendaVendedores() {
     [removeLeadSinCita, showToast]
   );
 
+  // Pasa a "modo colocar cita" para un lead de Sin cita: lleva a la Agenda semanal y deja
+  // pendiente sus datos (cliente, teléfono, gestor, marca) para prellenar el modal en cuanto
+  // se pulse un hueco. No crea nada todavía.
+  const handleAgendarDesdeLead = useCallback(
+    (lead) => {
+      setLeadParaAgendar(lead);
+      setVista("agenda");
+      setModoAgendaVista("semana");
+      showToast(`Elige un hueco en la agenda para ${lead.cliente || "este cliente"}`);
+    },
+    [showToast]
+  );
+
+  const handleCancelarAgendarDesdeLead = useCallback(() => {
+    setLeadParaAgendar(null);
+  }, []);
+
   // Marca manualmente el estado de venta de un cliente sin cita (Vendido / No vendido /
   // Pendiente). Esta marca manual tiene prioridad sobre el cotejo automático por teléfono con
   // los listados de ventas: si el gestor ya sabe el resultado, no hace falta esperar a que
@@ -1673,7 +1692,7 @@ export default function AgendaVendedores() {
   );
 
   const handleSaveCita = useCallback(
-    async (vendorId, dayIdx, hour, cliente, telefono, idExistente, gestorId, marca, horaExacta) => {
+    async (vendorId, dayIdx, hour, cliente, telefono, idExistente, gestorId, marca, horaExacta, leadIdOrigen) => {
       if (idExistente) {
         await updateCita(idExistente, { vendorId, day: dayIdx, hour, horaExacta, cliente: cliente || "", telefono: telefono || "", gestorId: gestorId || "", marca: marca || "" });
         showToast("Cita actualizada");
@@ -1690,11 +1709,19 @@ export default function AgendaVendedores() {
           marca: marca || "",
           estado: "activa",
         });
-        showToast("Cita asignada");
+        // Si la cita se creó desde "Sin cita" (botón "Agendar cita"), el lead de origen ya no
+        // pinta nada ahí: ya es una cita real, así que se retira automáticamente de ese listado.
+        if (leadIdOrigen) {
+          await removeLeadSinCita(leadIdOrigen);
+          setLeadParaAgendar(null);
+          showToast(`Cita asignada y ${cliente || "el lead"} retirado de Sin cita`);
+        } else {
+          showToast("Cita asignada");
+        }
       }
       setModalCita(null);
     },
-    [addCita, updateCita, showToast]
+    [addCita, updateCita, removeLeadSinCita, showToast]
   );
 
   const handleCancelCita = useCallback(
@@ -2777,6 +2804,19 @@ export default function AgendaVendedores() {
           )}
         </div>
 
+        {vista === "agenda" && leadParaAgendar && (
+          <div style={styles.bannerAgendarLead}>
+            <CalendarPlus size={15} />
+            <span>
+              Agendando cita para <strong>{leadParaAgendar.cliente || "este cliente"}</strong>
+              {leadParaAgendar.telefono ? ` (${leadParaAgendar.telefono})` : ""} — pulsa "+" en el hueco que quieras de la agenda semanal.
+            </span>
+            <button onClick={handleCancelarAgendarDesdeLead} style={styles.bannerAgendarLeadCerrar}>
+              <X size={13} /> Cancelar
+            </button>
+          </div>
+        )}
+
         {vendedores.length > 0 && (
           <div style={styles.filterBar}>
             <MapPin size={13} color="#A89B7E" style={{ flexShrink: 0 }} />
@@ -3193,6 +3233,13 @@ export default function AgendaVendedores() {
                                     <X size={11} />
                                   </button>
                                 </div>
+                                <button
+                                  onClick={() => handleAgendarDesdeLead(l)}
+                                  style={styles.agendarDesdeLeadBtn}
+                                  title={`Agendar una cita para ${l.cliente || "este cliente"}`}
+                                >
+                                  <CalendarPlus size={13} /> Agendar
+                                </button>
                                 <button onClick={() => handleRemoveLeadSinCita(l.id)} style={styles.iconBtn} aria-label={`Eliminar ${l.cliente}`}>
                                   <Trash2 size={15} />
                                 </button>
@@ -3966,7 +4013,21 @@ export default function AgendaVendedores() {
                       })}
                       {disponibles.length > 0 && (
                         <button
-                          onClick={() => setModalCita({ day: dayIdx, hour: h })}
+                          onClick={() =>
+                            setModalCita({
+                              day: dayIdx,
+                              hour: h,
+                              prellenar: leadParaAgendar
+                                ? {
+                                    cliente: leadParaAgendar.cliente || "",
+                                    telefono: leadParaAgendar.telefono || "",
+                                    gestorId: leadParaAgendar.gestorId || "",
+                                    marca: leadParaAgendar.marca || "",
+                                    leadId: leadParaAgendar.id,
+                                  }
+                                : null,
+                            })
+                          }
                           style={styles.addCitaBtn}
                           aria-label={`Añadir cita ${DIAS[dayIdx]} ${horaLabel(h)}`}
                         >
@@ -4811,11 +4872,12 @@ function CitaModal({ modalCita, vendedores, gestores, gestoresOrdenadosPorId, ve
   const disponibles = vendoresDisponibles(day, hour);
   const sugerido = !isEdit ? sugerirVendedor(day, hour) : null;
 
+  const prellenar = !isEdit ? modalCita.prellenar : null;
   const [vendorId, setVendorId] = useState(isEdit ? existing.vendorId : sugerido?.id || disponibles[0]?.id || "");
-  const [gestorId, setGestorId] = useState(isEdit ? existing.gestorId || "" : "");
-  const [cliente, setCliente] = useState(isEdit ? existing.cliente : "");
-  const [telefono, setTelefono] = useState(isEdit ? existing.telefono || "" : "");
-  const [marca, setMarca] = useState(isEdit ? existing.marca || "" : "");
+  const [gestorId, setGestorId] = useState(isEdit ? existing.gestorId || "" : prellenar?.gestorId || "");
+  const [cliente, setCliente] = useState(isEdit ? existing.cliente : prellenar?.cliente || "");
+  const [telefono, setTelefono] = useState(isEdit ? existing.telefono || "" : prellenar?.telefono || "");
+  const [marca, setMarca] = useState(isEdit ? existing.marca || "" : prellenar?.marca || "");
   // Hora exacta dentro de la franja de 30 min (ej. 9:15 dentro del bloque 9:00-9:30). Por
   // defecto es la hora en punto de la franja, pero se puede afinar. La franja (hour) sigue
   // siendo la que determina la fila de la rejilla y la comprobación de disponibilidad/turno.
@@ -5058,7 +5120,7 @@ function CitaModal({ modalCita, vendedores, gestores, gestoresOrdenadosPorId, ve
                 setErrorHoraExacta(`La hora debe estar entre ${horaLabel(hour)} y ${horaLabel(hour + anchoFranja)} (la franja de esta cita). Para otra franja, ciérrala y pulsa "+" en la casilla correcta.`);
                 return;
               }
-              onSave(vendorId, day, hour, cliente, telefono, isEdit ? existing.id : null, gestorId, marca, horaExactaDecimal);
+              onSave(vendorId, day, hour, cliente, telefono, isEdit ? existing.id : null, gestorId, marca, horaExactaDecimal, prellenar?.leadId || null);
             }}
             style={{ ...styles.primaryBtn, opacity: vendorActual ? 1 : 0.5 }}
           >
@@ -5152,6 +5214,9 @@ const styles = {
   balanceSold: { display: "flex", alignItems: "center", gap: 4, fontSize: 12, color: TOKENS.successText, background: TOKENS.successBg, padding: "5px 9px", borderRadius: 7, fontWeight: 600 },
 
   filterBar: { display: "flex", alignItems: "center", gap: 8, marginTop: 12, paddingTop: 12, borderTop: `1px solid ${TOKENS.borderSubtle}`, flexWrap: "wrap" },
+  bannerAgendarLead: { display: "flex", alignItems: "center", gap: 8, marginTop: 12, padding: "10px 14px", background: TOKENS.bgSubtle, border: `1px solid ${TOKENS.primary}`, borderRadius: 10, fontSize: 13, color: TOKENS.textPrimary },
+  bannerAgendarLeadCerrar: { display: "flex", alignItems: "center", gap: 4, marginLeft: "auto", border: "none", background: "transparent", color: TOKENS.dangerText, fontSize: 12.5, fontWeight: 600, flexShrink: 0 },
+  agendarDesdeLeadBtn: { display: "flex", alignItems: "center", gap: 4, border: `1px solid ${TOKENS.primary}`, background: "#fff", color: TOKENS.primary, fontSize: 11.5, fontWeight: 600, padding: "5px 10px", borderRadius: 7, whiteSpace: "nowrap", flexShrink: 0 },
   filterDot: { width: 6, height: 6, borderRadius: "50%", display: "inline-block" },
   filterClear: { display: "flex", alignItems: "center", gap: 4, border: "none", background: "transparent", color: TOKENS.dangerText, fontSize: 12, fontWeight: 600, padding: "4px 6px", marginLeft: "auto" },
   filtroDesplegableWrap: { position: "relative" },

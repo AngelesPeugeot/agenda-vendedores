@@ -4150,6 +4150,7 @@ export default function AgendaVendedores() {
           modalCita={modalCita}
           vendedores={vendedores}
           gestores={gestores}
+          gestoresOrdenadosPorId={gestoresOrdenadosPorId}
           vendoresDisponibles={vendoresDisponibles}
           sugerirVendedor={sugerirVendedor}
           citasDeVendorEnMes={citasDeVendorEnMes}
@@ -4230,6 +4231,130 @@ function useFocusTrap(onClose) {
   }, [onClose]);
 
   return contenedorRef;
+}
+
+// ---------- Combobox con búsqueda (patrón ARIA combobox) ----------
+// Sustituye a un <select> largo cuando hay muchas opciones (ej. 20 vendedores): escribes y
+// filtra en vivo, con navegación completa por teclado (flechas, Enter, Escape) y ratón. Se
+// comporta como un campo de texto normal hasta que se abre; al elegir una opción, vuelve a
+// mostrar su etiqueta como un select cualquiera.
+function ComboboxBuscable({ id, opciones, valor, onCambiar, placeholder, colorDe, deshabilitado }) {
+  const [abierto, setAbierto] = useState(false);
+  const [texto, setTexto] = useState("");
+  const [indiceActivo, setIndiceActivo] = useState(-1);
+  const inputRef = useRef(null);
+  const wrapRef = useRef(null);
+
+  const opcionSeleccionada = opciones.find((o) => o.id === valor) || null;
+
+  useEffect(() => {
+    if (!abierto) return;
+    const cerrarSiFuera = (e) => {
+      if (wrapRef.current && !wrapRef.current.contains(e.target)) {
+        setAbierto(false);
+        setTexto("");
+      }
+    };
+    document.addEventListener("mousedown", cerrarSiFuera);
+    return () => document.removeEventListener("mousedown", cerrarSiFuera);
+  }, [abierto]);
+
+  const filtradas = useMemo(() => {
+    const q = texto.trim().toLowerCase();
+    if (!q) return opciones;
+    return opciones.filter((o) => o.label.toLowerCase().includes(q));
+  }, [opciones, texto]);
+
+  useEffect(() => {
+    setIndiceActivo(filtradas.length > 0 ? 0 : -1);
+  }, [texto, abierto]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const seleccionar = useCallback(
+    (opcion) => {
+      onCambiar(opcion ? opcion.id : "");
+      setAbierto(false);
+      setTexto("");
+    },
+    [onCambiar]
+  );
+
+  const manejarTeclado = (e) => {
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      if (!abierto) { setAbierto(true); return; }
+      setIndiceActivo((i) => Math.min(i + 1, filtradas.length - 1));
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      setIndiceActivo((i) => Math.max(i - 1, 0));
+    } else if (e.key === "Enter") {
+      e.preventDefault();
+      if (abierto && indiceActivo >= 0 && filtradas[indiceActivo]) seleccionar(filtradas[indiceActivo]);
+      else setAbierto(true);
+    } else if (e.key === "Escape") {
+      if (abierto) {
+        e.stopPropagation(); // no cerrar también el modal si solo queríamos cerrar el combobox
+        setAbierto(false);
+        setTexto("");
+      }
+    }
+  };
+
+  return (
+    <div ref={wrapRef} style={{ position: "relative", flex: 1 }}>
+      <div
+        style={{ ...styles.comboboxCaja, ...(deshabilitado ? { opacity: 0.6, cursor: "not-allowed" } : {}) }}
+        onClick={() => !deshabilitado && inputRef.current?.focus()}
+      >
+        {!abierto && opcionSeleccionada && colorDe && (
+          <span style={{ ...styles.vendorDot, background: colorDe(opcionSeleccionada) }} />
+        )}
+        <input
+          ref={inputRef}
+          role="combobox"
+          aria-expanded={abierto}
+          aria-controls={`${id}-listbox`}
+          aria-activedescendant={abierto && indiceActivo >= 0 ? `${id}-opcion-${indiceActivo}` : undefined}
+          aria-autocomplete="list"
+          value={abierto ? texto : opcionSeleccionada?.label || ""}
+          onChange={(e) => {
+            setTexto(e.target.value);
+            if (!abierto) setAbierto(true);
+          }}
+          onFocus={() => setAbierto(true)}
+          onKeyDown={manejarTeclado}
+          placeholder={placeholder}
+          disabled={deshabilitado}
+          style={styles.comboboxInput}
+        />
+        <ChevronDown size={13} style={{ opacity: 0.5, flexShrink: 0, transform: abierto ? "rotate(180deg)" : "none" }} />
+      </div>
+      {abierto && (
+        <ul id={`${id}-listbox`} role="listbox" style={styles.comboboxListbox}>
+          {filtradas.length === 0 ? (
+            <li style={styles.comboboxSinResultados}>Sin resultados para "{texto}"</li>
+          ) : (
+            filtradas.map((o, i) => (
+              <li
+                key={o.id}
+                id={`${id}-opcion-${i}`}
+                role="option"
+                aria-selected={o.id === valor}
+                onMouseDown={(e) => {
+                  e.preventDefault(); // evita que el input pierda el foco antes del click
+                  seleccionar(o);
+                }}
+                onMouseEnter={() => setIndiceActivo(i)}
+                style={{ ...styles.comboboxOpcion, ...(i === indiceActivo ? styles.comboboxOpcionActiva : {}) }}
+              >
+                {colorDe && <span style={{ ...styles.vendorDot, background: colorDe(o) }} />}
+                {o.label}
+              </li>
+            ))
+          )}
+        </ul>
+      )}
+    </div>
+  );
 }
 
 // ---------- Botón con desplegable de opciones marcables (multi-selección) ----------
@@ -4675,7 +4800,7 @@ function VendedorRow({ vendedor, citasCount, onRemove, onUpdateUbicacion, onUpda
 }
 
 // ---------- Modal de cita (crear / editar / cancelar / eliminar) ----------
-function CitaModal({ modalCita, vendedores, gestores, vendoresDisponibles, sugerirVendedor, citasDeVendorEnMes, weekDates, dias, ventasParaTelefono, esVendida, onClose, onSave, onCancel, onDelete, onSetAsistencia }) {
+function CitaModal({ modalCita, vendedores, gestores, gestoresOrdenadosPorId, vendoresDisponibles, sugerirVendedor, citasDeVendorEnMes, weekDates, dias, ventasParaTelefono, esVendida, onClose, onSave, onCancel, onDelete, onSetAsistencia }) {
   const modalRef = useFocusTrap(onClose);
   const isEdit = !!modalCita.existing;
   const existing = modalCita.existing;
@@ -4819,20 +4944,18 @@ function CitaModal({ modalCita, vendedores, gestores, vendoresDisponibles, suger
         )}
 
         <div style={styles.modalField}>
-          <label style={styles.modalLabel}>Vendedor</label>
+          <label style={styles.modalLabel} id="cita-vendedor-label">Vendedor</label>
           {opcionesVendedor.length === 0 ? (
             <div style={styles.noVendorWarn}>Nadie tiene turno en este horario.</div>
           ) : (
-            <div style={styles.vendorSelectRow}>
-              {vendorActual && (
-                <span style={{ ...styles.vendorDot, background: colorParaSede(vendorActual.isla, vendorActual.sede).border }} />
-              )}
-              <select value={vendorId} onChange={(e) => setVendorId(e.target.value)} style={{ ...styles.select, width: "100%" }}>
-                {opcionesVendedor.map((v) => (
-                  <option key={v.id} value={v.id}>{v.nombre} ({v.sede})</option>
-                ))}
-              </select>
-            </div>
+            <ComboboxBuscable
+              id="cita-vendedor"
+              opciones={opcionesVendedor.map((v) => ({ id: v.id, label: `${v.nombre} (${v.sede})`, isla: v.isla, sede: v.sede }))}
+              valor={vendorId}
+              onCambiar={setVendorId}
+              placeholder="Escribe para buscar un vendedor…"
+              colorDe={(o) => colorParaSede(o.isla, o.sede).border}
+            />
           )}
           {avisoSobrecarga && (
             <div style={styles.avisoSobrecargaBox}>
@@ -4866,12 +4989,14 @@ function CitaModal({ modalCita, vendedores, gestores, vendoresDisponibles, suger
           {gestores.length === 0 ? (
             <div style={styles.panelHint}>Aún no hay gestores lead creados. Puedes añadirlos en la pestaña "Gestores".</div>
           ) : (
-            <select value={gestorId} onChange={(e) => setGestorId(e.target.value)} style={{ ...styles.select, width: "100%" }}>
-              <option value="">Sin gestor asignado</option>
-              {gestores.map((g) => (
-                <option key={g.id} value={g.id}>{g.nombre}</option>
-              ))}
-            </select>
+            <ComboboxBuscable
+              id="cita-gestor"
+              opciones={gestores.map((g) => ({ id: g.id, label: g.nombre }))}
+              valor={gestorId}
+              onCambiar={setGestorId}
+              placeholder="Sin gestor asignado (escribe para buscar)…"
+              colorDe={(o) => colorParaGestor(o.id, gestoresOrdenadosPorId).border}
+            />
           )}
         </div>
 
@@ -5062,6 +5187,12 @@ const styles = {
   selectDestacado: { border: `1.5px solid ${TOKENS.primary}`, background: "#fff", color: TOKENS.textPrimary, borderRadius: 9, padding: "8px 12px", fontSize: 13, fontWeight: 600, minWidth: 150 },
   input: { flex: 1, border: `1px solid ${TOKENS.borderInput}`, borderRadius: 9, padding: "9px 12px", fontSize: 13.5, background: "#fff", color: TOKENS.textDarkest, minWidth: 140 },
   select: { border: `1px solid ${TOKENS.borderInput}`, borderRadius: 9, padding: "9px 10px", fontSize: 13, background: "#fff", color: TOKENS.textDarkest, minWidth: 120 },
+  comboboxCaja: { display: "flex", alignItems: "center", gap: 6, border: `1px solid ${TOKENS.borderInput}`, borderRadius: 9, padding: "9px 10px", background: "#fff", cursor: "text" },
+  comboboxInput: { flex: 1, border: "none", outline: "none", background: "transparent", padding: 0, fontSize: 13.5, color: TOKENS.textDarkest, fontFamily: "inherit", minWidth: 0 },
+  comboboxListbox: { position: "absolute", top: "calc(100% + 4px)", left: 0, right: 0, background: "#fff", border: `1px solid ${TOKENS.borderDefault}`, borderRadius: 9, boxShadow: "0 8px 24px rgba(0,0,0,0.14)", maxHeight: 220, overflowY: "auto", zIndex: 60, padding: 4, margin: 0, listStyle: "none" },
+  comboboxOpcion: { display: "flex", alignItems: "center", gap: 8, padding: "8px 10px", borderRadius: 6, fontSize: 13, color: TOKENS.textBody, cursor: "pointer" },
+  comboboxOpcionActiva: { background: TOKENS.bgSubtle, color: TOKENS.textPrimary },
+  comboboxSinResultados: { padding: "10px", fontSize: 12.5, color: TOKENS.textSubtle, fontStyle: "italic" },
   selectSmall: { border: `1px solid ${TOKENS.borderInput}`, borderRadius: 7, padding: "5px 7px", fontSize: 12, background: "#fff", color: TOKENS.textDarkest },
   primaryBtn: { display: "flex", alignItems: "center", gap: 6, border: "none", background: TOKENS.primary, color: "#FFFFFF", borderRadius: 9, padding: "9px 14px", fontSize: 13.5, fontWeight: 600, whiteSpace: "nowrap" },
   secondaryBtn: { border: `1px solid ${TOKENS.borderInput}`, background: "#fff", color: TOKENS.textBody, borderRadius: 9, padding: "9px 14px", fontSize: 13.5, fontWeight: 500 },

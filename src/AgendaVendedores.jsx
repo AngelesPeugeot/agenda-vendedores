@@ -1304,6 +1304,10 @@ export default function AgendaVendedores() {
 
         let creadas = 0, sinVendedor = 0, duplicadas = 0, sinHoraValida = 0, sinTelefono = 0;
         const updates = {};
+        // Claves (teléfono+semana+día+franja) ya creadas DENTRO de esta misma subida, para
+        // detectar filas duplicadas del propio archivo (no solo duplicados contra citas que ya
+        // existieran de antes en la base de datos).
+        const clavesEnEsteArchivo = new Set();
 
         rows.forEach((r) => {
           const telefonoOriginal = String(r[kPhone] || "").trim();
@@ -1331,6 +1335,7 @@ export default function AgendaVendedores() {
 
           const hourSlot = Math.floor(horaExacta / (SLOT_MIN / 60)) * (SLOT_MIN / 60);
           const weekKeyFila = fmtWeekKey(getMonday(fecha));
+          const claveFila = `${phone}_${weekKeyFila}_${diaSemana}_${hourSlot}`;
 
           const yaExiste = todasLasCitas.some(
             (c) =>
@@ -1340,10 +1345,11 @@ export default function AgendaVendedores() {
               c.day === diaSemana &&
               c.hour === hourSlot
           );
-          if (yaExiste) {
+          if (yaExiste || clavesEnEsteArchivo.has(claveFila)) {
             duplicadas += 1;
             return;
           }
+          clavesEnEsteArchivo.add(claveFila);
 
           const vendedorTexto = kVendedor ? String(r[kVendedor] || "").trim() : "";
           const vendedorNombreCanonico = vendedorTexto ? emparejarNombrePersona(vendedorTexto, vendedores, "nombre") : null;

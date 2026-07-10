@@ -4174,6 +4174,64 @@ function FragmentRow({ children }) {
   return <>{children}</>;
 }
 
+// ---------- Accesibilidad: atrapa el foco dentro de un modal mientras está abierto ----------
+// Al montarse: guarda qué elemento tenía el foco antes (para devolvérselo al cerrar) y mueve el
+// foco al primer campo del modal. Mientras está abierto: Tab/Shift+Tab solo recorren los
+// elementos DENTRO del modal (no se puede "salir" tabulando a lo que hay detrás), y Escape lo
+// cierra. También bloquea el scroll del fondo mientras el modal está abierto. Devuelve la ref
+// que hay que colocar en el contenedor del modal.
+function useFocusTrap(onClose) {
+  const contenedorRef = useRef(null);
+
+  useEffect(() => {
+    const elementoAnterior = document.activeElement;
+    const overflowPrevio = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+
+    const seleccionEnfocable = 'a[href], button:not([disabled]), textarea, input, select, [tabindex]:not([tabindex="-1"])';
+    const getFocosables = () =>
+      contenedorRef.current
+        ? Array.from(contenedorRef.current.querySelectorAll(seleccionEnfocable)).filter((el) => el.offsetParent !== null)
+        : [];
+
+    // Mueve el foco al primer campo del modal (no al botón de cerrar) en cuanto se monta.
+    const focosablesIniciales = getFocosables();
+    if (focosablesIniciales.length > 0) focosablesIniciales[0].focus();
+    else contenedorRef.current?.focus();
+
+    const manejarTeclado = (e) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        onClose?.();
+        return;
+      }
+      if (e.key !== "Tab") return;
+      const items = getFocosables();
+      if (items.length === 0) return;
+      const primero = items[0];
+      const ultimo = items[items.length - 1];
+      if (e.shiftKey && document.activeElement === primero) {
+        e.preventDefault();
+        ultimo.focus();
+      } else if (!e.shiftKey && document.activeElement === ultimo) {
+        e.preventDefault();
+        primero.focus();
+      }
+    };
+
+    document.addEventListener("keydown", manejarTeclado);
+    return () => {
+      document.removeEventListener("keydown", manejarTeclado);
+      document.body.style.overflow = overflowPrevio;
+      // Devuelve el foco a donde estaba antes de abrir el modal (normalmente el botón "+" o
+      // la cita que se pulsó), para no dejar al usuario de teclado "perdido" tras cerrar.
+      elementoAnterior?.focus?.();
+    };
+  }, [onClose]);
+
+  return contenedorRef;
+}
+
 // ---------- Botón con desplegable de opciones marcables (multi-selección) ----------
 // Sustituye a las hileras de chips: un botón muestra el nombre del filtro (y cuántas opciones
 // hay activas), y al pulsarlo despliega un panel con checkboxes para cada opción. Se cierra
@@ -4618,6 +4676,7 @@ function VendedorRow({ vendedor, citasCount, onRemove, onUpdateUbicacion, onUpda
 
 // ---------- Modal de cita (crear / editar / cancelar / eliminar) ----------
 function CitaModal({ modalCita, vendedores, gestores, vendoresDisponibles, sugerirVendedor, citasDeVendorEnMes, weekDates, dias, ventasParaTelefono, esVendida, onClose, onSave, onCancel, onDelete, onSetAsistencia }) {
+  const modalRef = useFocusTrap(onClose);
   const isEdit = !!modalCita.existing;
   const existing = modalCita.existing;
   const day = isEdit ? existing.day : modalCita.day;
@@ -4690,10 +4749,18 @@ function CitaModal({ modalCita, vendedores, gestores, vendoresDisponibles, suger
 
   return (
     <div style={styles.modalOverlay} onClick={onClose}>
-      <div style={styles.modalCard} onClick={(e) => e.stopPropagation()}>
+      <div
+        ref={modalRef}
+        style={styles.modalCard}
+        onClick={(e) => e.stopPropagation()}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="cita-modal-titulo"
+        tabIndex={-1}
+      >
         <div style={styles.modalHeader}>
           <div>
-            <div style={styles.modalTitle}>
+            <div style={styles.modalTitle} id="cita-modal-titulo">
               {isEdit ? (cancelada ? "Cita cancelada" : "Editar cita") : "Nueva cita"}
             </div>
             <div style={styles.modalSub}>{dias[day]} · franja {horaLabel(hour)}-{horaLabel(hour + SLOT_MIN / 60)}</div>
@@ -4907,8 +4974,8 @@ const TOKENS = {
   textPrimary: "#3D362A",
   textBody: "#5C5240",
   textMuted: "#7A6B4C",
-  textSubtle: "#8A7B5C",
-  textPlaceholder: "#A89B7E",
+  textSubtle: "#807152", // ajustado para cumplir contraste WCAG AA (antes #8A7B5C, no llegaba a 4.5:1)
+  textPlaceholder: "#807152", // mismo valor que textSubtle: no es posible mantener un tercer nivel de "apagado" distinto que también cumpla AA sobre estos fondos (antes #A89B7E, solo 2.72:1 — fallaba incluso para texto grande)
 
   // Bordes
   borderDefault: "#EBE4D3",
@@ -4921,7 +4988,7 @@ const TOKENS = {
   bgSubtle: "#F1EAD9",
 
   // Color de acción principal (marca de la app)
-  primary: "#C45A2E",
+  primary: "#BF5529", // ligeramente más oscuro que el original #C45A2E: con texto blanco encima (botones), el original solo llegaba a 4.11:1, por debajo del mínimo AA de 4.5:1
 
   // Estados semánticos: éxito / error / aviso
   successText: "#2F5E3F",
@@ -4938,7 +5005,7 @@ const styles = {
   header: { background: TOKENS.bgApp, borderBottom: `1px solid ${TOKENS.borderDefault}`, padding: "18px 22px 14px" },
   headerTop: { display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 12, marginBottom: 14 },
   brand: { display: "flex", alignItems: "center", gap: 12 },
-  brandMark: { width: 38, height: 38, borderRadius: 10, background: TOKENS.primary, color: "#FFF8EE", display: "flex", alignItems: "center", justifyContent: "center", fontFamily: "var(--font-display)", fontWeight: 600, fontSize: 15, flexShrink: 0 },
+  brandMark: { width: 38, height: 38, borderRadius: 10, background: TOKENS.primary, color: "#FFFFFF", display: "flex", alignItems: "center", justifyContent: "center", fontFamily: "var(--font-display)", fontWeight: 600, fontSize: 15, flexShrink: 0 },
   brandTitle: { fontFamily: "var(--font-display)", fontWeight: 600, fontSize: 19, lineHeight: 1.1 },
   brandSub: { fontSize: 12, marginTop: 2 },
   syncOk: { display: "inline-flex", alignItems: "center", gap: 4, color: TOKENS.successText },
@@ -4996,7 +5063,7 @@ const styles = {
   input: { flex: 1, border: `1px solid ${TOKENS.borderInput}`, borderRadius: 9, padding: "9px 12px", fontSize: 13.5, background: "#fff", color: TOKENS.textDarkest, minWidth: 140 },
   select: { border: `1px solid ${TOKENS.borderInput}`, borderRadius: 9, padding: "9px 10px", fontSize: 13, background: "#fff", color: TOKENS.textDarkest, minWidth: 120 },
   selectSmall: { border: `1px solid ${TOKENS.borderInput}`, borderRadius: 7, padding: "5px 7px", fontSize: 12, background: "#fff", color: TOKENS.textDarkest },
-  primaryBtn: { display: "flex", alignItems: "center", gap: 6, border: "none", background: TOKENS.primary, color: "#FFF8EE", borderRadius: 9, padding: "9px 14px", fontSize: 13.5, fontWeight: 600, whiteSpace: "nowrap" },
+  primaryBtn: { display: "flex", alignItems: "center", gap: 6, border: "none", background: TOKENS.primary, color: "#FFFFFF", borderRadius: 9, padding: "9px 14px", fontSize: 13.5, fontWeight: 600, whiteSpace: "nowrap" },
   secondaryBtn: { border: `1px solid ${TOKENS.borderInput}`, background: "#fff", color: TOKENS.textBody, borderRadius: 9, padding: "9px 14px", fontSize: 13.5, fontWeight: 500 },
   secondaryBtnSmall: { display: "flex", alignItems: "center", gap: 5, border: `1px solid ${TOKENS.borderInput}`, background: "#fff", color: TOKENS.textBody, borderRadius: 7, padding: "5px 10px", fontSize: 12, fontWeight: 500, whiteSpace: "nowrap" },
   warnBtn: { display: "flex", alignItems: "center", gap: 6, border: "1px solid #E8D2A8", background: TOKENS.warningBg, color: TOKENS.warningText, borderRadius: 9, padding: "9px 14px", fontSize: 13, fontWeight: 600 },

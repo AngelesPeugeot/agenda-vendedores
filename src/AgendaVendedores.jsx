@@ -12,6 +12,7 @@ import {
   Plus,
   X,
   Clock,
+  Package,
   Users,
   Calendar,
   CalendarPlus,
@@ -1791,7 +1792,9 @@ export default function AgendaVendedores() {
           const kDate = findKey("fecha");
           const kVendedor = findKey("vendedor", "comercial", "asesor");
           const kGestorLead = findKey("gestor", "lead", "captador");
-          const kCoche = findKey("matricula", "coche", "vehiculo", "car");
+          const kCoche = findKey("coche", "vehiculo", "car");
+          const kMatricula = findKey("matricula", "matrcula", "placa", "plate");
+          const kBastidor = findKey("bastidor", "chasis", "chassis");
           const kModelo = findKey("modelo", "model");
           const kIsla = findKey("isla", "island", "provincia");
           const kSede = findKey("sede", "oficina", "delegacion", "branch");
@@ -1836,8 +1839,8 @@ export default function AgendaVendedores() {
           };
 
           // Pedido: coche encargado a fábrica, pendiente de matricular. Es un estado aparte de
-          // "vendido", no un sinónimo — cuando se re-suba el Excel más adelante con CIERRE ya
-          // en "Vendido" para ese mismo teléfono, pasará a contar como venta real.
+          // "vendido", no un sinónimo — cuando se re-suba el Excel más adelante con matrícula o
+          // CIERRE ya en "Vendido" para ese mismo teléfono, pasará a contar como venta real.
           const esPedidoTexto = (val) => {
             const s = String(val ?? "").trim().toLowerCase();
             return s === "pedido";
@@ -1859,18 +1862,56 @@ export default function AgendaVendedores() {
             const gestorCanonico = gestorTexto ? emparejarNombrePersona(gestorTexto, gestores, "nombre") : null;
             const marcaTexto = kMarca ? String(r[kMarca] || "").trim() : "";
             const marcaCanonica = MARCAS.find((m) => normalizarNombrePersona(m) === normalizarNombrePersona(marcaTexto));
+
+            // Matrícula/bastidor son la señal más fiable de que el coche ya está registrado de
+            // verdad (un dato objetivo, no depende de que alguien escriba bien "Vendido" en
+            // CIERRE), así que mandan sobre el texto de CIERRE cuando están presentes.
+            const matriculaTexto = kMatricula ? String(r[kMatricula] || "").trim() : "";
+            const bastidorTexto = kBastidor ? String(r[kBastidor] || "").trim() : "";
+            const cocheTexto = kCoche ? String(r[kCoche] || "").trim() : "";
+            const tieneMatriculaOBastidor = Boolean(matriculaTexto || bastidorTexto);
+
+            let vendido;
+            let pedido;
+            if (tieneMatriculaOBastidor) {
+              vendido = true;
+              pedido = false;
+            } else {
+              const vendidoTexto = kVendido ? esVendidoTexto(r[kVendido]) : null;
+              if (vendidoTexto === true) {
+                vendido = true;
+                pedido = false;
+              } else if (vendidoTexto === false) {
+                vendido = false;
+                pedido = false;
+              } else {
+                // Sin matrícula/bastidor y sin un "Vendido" explícito: si CIERRE dice "Pedido",
+                // se trata como pedido. Si el archivo ni siquiera tiene columna de estado (ej.
+                // un listado de pedidos que solo trae CAR, sin CIERRE) y hay un coche/CAR de
+                // referencia, también se trata como pedido. Pero si SÍ hay columna CIERRE y
+                // simplemente viene vacía en esta fila, se deja como "sin decidir" de toda la
+                // vida — no se asume pedido solo porque haya un modelo de interés apuntado.
+                vendido = null;
+                const cierreDiceExplicitamentePedido = kVendido && esPedidoTexto(r[kVendido]);
+                const archivoSinColumnaDeEstado = !kVendido && Boolean(cocheTexto);
+                pedido = Boolean(cierreDiceExplicitamentePedido || archivoSinColumnaDeEstado);
+              }
+            }
+
             return {
               phone: normalizePhone(r[kPhone]),
               date: fecha,
               vendedor: vendedorCanonico || vendedorTexto,
               gestorLead: gestorCanonico || gestorTexto,
-              coche: kCoche ? String(r[kCoche] || "").trim() : "",
+              coche: cocheTexto,
+              matricula: matriculaTexto,
+              bastidor: bastidorTexto,
               modelo: kModelo ? String(r[kModelo] || "").trim() : "",
               isla: kIsla ? normalizarIsla(r[kIsla]) : "",
               sede: kSede ? String(r[kSede] || "").trim() : "",
               cliente: kCliente ? String(r[kCliente] || "").trim() : "",
-              vendido: kVendido ? esVendidoTexto(r[kVendido]) : null,
-              pedido: kVendido ? esPedidoTexto(r[kVendido]) : false,
+              vendido,
+              pedido,
               marca: marcaCanonica || marcaTexto,
               mesAnio,
             };
@@ -2026,6 +2067,18 @@ export default function AgendaVendedores() {
     });
     return ids;
   }, [citasActivas, hayVentasCargadas, ventasParaTelefono, esVendida]);
+
+  // Citas cuyo cliente aparece "en pedido" (coche encargado a fábrica, pendiente de matricular)
+  // en los listados de ventas subidos — para mostrar un indicador propio en la agenda, distinto
+  // del check verde de "vendida".
+  const citasConPedido = useMemo(() => {
+    if (!hayVentasCargadas) return new Set();
+    const ids = new Set();
+    citasActivas.forEach((c) => {
+      if (c.telefono && esPedido(ventasParaTelefono(c.telefono))) ids.add(c.id);
+    });
+    return ids;
+  }, [citasActivas, hayVentasCargadas, ventasParaTelefono, esPedido]);
 
   const leadsSinCitaConVenta = useMemo(() => {
     const ids = new Set();
@@ -2480,17 +2533,20 @@ export default function AgendaVendedores() {
       : [];
     const totalVendidos = vendidos.length;
     const totalNoVendidos = noVendidos.length;
-    // Pedidos: coches encargados a fábrica, pendientes de matricular. No se restan de
-    // "sin decidir" porque son un estado propio, no una venta confirmada ni un "no vendido".
+    // Pedidos: coches encargados a fábrica, pendientes de matricular. Es un estado propio, no
+    // una venta confirmada ni un "no vendido" — se resta de "sin decidir" para que el donut
+    // sume el 100% sin solaparse (un pedido ya no está genuinamente "sin decidir", se sabe que
+    // hay una operación en curso).
     const totalPedidos = registrosUnicos.filter((r) => !esVendidaRecord(r) && r.vendido !== false && r.pedido === true).length;
-    const totalSinDecidir = totalRegistros - totalVendidos - totalNoVendidos;
+    const totalSinDecidir = totalRegistros - totalVendidos - totalNoVendidos - totalPedidos;
     const tasaConversion = totalRegistros > 0 ? Math.round((totalVendidos / totalRegistros) * 100) : 0;
 
     // Datos listos para el gráfico donut de estado general (solo se incluyen los que tengan
     // algún registro, para no mostrar segmentos vacíos en la leyenda).
     const datosDonut = [
-      { nombre: "Vendido", valor: totalVendidos, color: "#4F9B72" },
-      { nombre: "No vendido", valor: totalNoVendidos, color: "#C45A2E" },
+      { nombre: "Vendido", valor: totalVendidos, color: TOKENS.successBorder },
+      { nombre: "Pedido", valor: totalPedidos, color: TOKENS.warningText },
+      { nombre: "No vendido", valor: totalNoVendidos, color: TOKENS.primary },
       { nombre: "Sin decidir", valor: totalSinDecidir, color: "#D8CFB8" },
     ].filter((d) => d.valor > 0);
 
@@ -2718,7 +2774,7 @@ export default function AgendaVendedores() {
         r.sede || "",
         r.marca || "",
         r.modelo || r.coche || "",
-        r.vendido === true ? "Vendido" : r.vendido === false ? "No vendido" : "Sin decidir",
+        r.vendido === true ? "Vendido" : r.vendido === false ? "No vendido" : r.pedido ? "Pedido" : "Sin decidir",
       ]),
     ]);
     XLSX.utils.book_append_sheet(wb, hojaDetalle, "Detalle");
@@ -3563,10 +3619,11 @@ export default function AgendaVendedores() {
                       const g = gestores.find((gg) => gg.id === c.gestorId);
                       const matches = ventasParaTelefono(c.telefono);
                       const vendida = esVendida(matches);
+                      const enPedido = !vendida && esPedido(matches);
                       const mejor = matches[0];
                       const colorV = v ? colorParaSede(v.isla, v.sede) : null;
                       return (
-                        <div key={c.id} style={{ ...styles.cotejoRow, borderLeftColor: vendida ? "#4F9B72" : "#E5E0D4" }}>
+                        <div key={c.id} style={{ ...styles.cotejoRow, borderLeftColor: vendida ? TOKENS.successBorder : enPedido ? TOKENS.warningText : TOKENS.borderInput }}>
                           <div style={{ ...styles.vendorDot, background: colorV?.border || "#ccc" }} />
                           <div style={{ flex: 1, minWidth: 0 }}>
                             <div style={styles.cotejoName}>
@@ -3585,6 +3642,11 @@ export default function AgendaVendedores() {
                                 <Check size={12} /> Vendido
                                 {mejor?.modelo ? ` · ${mejor.modelo}` : mejor?.coche ? ` · ${mejor.coche}` : ""}
                                 {mejor?.date ? ` · ${fmtDateShort(mejor.date)}` : ""}
+                              </div>
+                            ) : enPedido ? (
+                              <div style={styles.pedidoTag}>
+                                <Package size={12} /> Pedido
+                                {mejor?.modelo ? ` · ${mejor.modelo}` : mejor?.coche ? ` · ${mejor.coche}` : ""}
                               </div>
                             ) : (
                               <div style={styles.pendienteTag}>No vendido{mejor?.date ? ` · ${fmtDateShort(mejor.date)}` : ""}</div>
@@ -4052,6 +4114,7 @@ export default function AgendaVendedores() {
                         const colorGestor = colorParaGestor(c.gestorId, gestoresOrdenadosPorId);
                         const colorSede = v ? colorParaSede(v.isla, v.sede) : null;
                         const vendida = citasConVenta.has(c.id);
+                        const enPedido = citasConPedido.has(c.id);
                         const noAsistio = c.asistio === false;
                         const siAsistio = c.asistio === true;
                         const fueraDeFiltro = v ? !vendedoresFiltrados.some((vf) => vf.id === v.id) : false;
@@ -4071,7 +4134,7 @@ export default function AgendaVendedores() {
                               opacity: fueraDeFiltro ? 0.4 : noAsistio ? 0.6 : 1,
                               ...(!v ? { borderStyle: "dashed" } : {}),
                             }}
-                            title={`${horaExactaLabel ? horaExactaLabel + " · " : ""}${v ? v.nombre : "Sin vendedor asignado"}${c.cliente ? " · " + c.cliente : ""}${c.telefono ? " · " + c.telefono : ""}${g ? " · Gestor: " + g.nombre : ""}${c.marca ? " · " + c.marca : ""}${noAsistio ? " · No asistió" : c.asistio === true ? " · Asistió" : ""}`}
+                            title={`${horaExactaLabel ? horaExactaLabel + " · " : ""}${v ? v.nombre : "Sin vendedor asignado"}${c.cliente ? " · " + c.cliente : ""}${c.telefono ? " · " + c.telefono : ""}${g ? " · Gestor: " + g.nombre : ""}${c.marca ? " · " + c.marca : ""}${noAsistio ? " · No asistió" : c.asistio === true ? " · Asistió" : ""}${vendida ? " · Vendido" : enPedido ? " · Pedido (pendiente de matricular)" : ""}`}
                           >
                             {colorSede && <span style={{ ...styles.citaDot, background: colorSede.border }} />}
                             {c.marca && <span style={{ ...styles.citaDot, background: colorParaMarca(c.marca).border }} />}
@@ -4084,8 +4147,10 @@ export default function AgendaVendedores() {
                               {siAsistio && <span style={styles.citaChipAsistio}>Asistió</span>}
                               {noAsistio && <span style={styles.citaChipNoAsistio}>No asistió</span>}
                               {!v && <span style={styles.citaChipNoAsistio}>Sin vendedor</span>}
+                              {enPedido && <span style={styles.citaChipPedido}>Pedido</span>}
                             </span>
-                            {vendida && <Check size={11} color="#4F9B72" style={{ flexShrink: 0 }} />}
+                            {vendida && <Check size={11} color={TOKENS.successBorder} style={{ flexShrink: 0 }} />}
+                            {!vendida && enPedido && <Package size={11} color={TOKENS.warningText} style={{ flexShrink: 0 }} />}
                           </button>
                         );
                       })}
@@ -5420,6 +5485,7 @@ const styles = {
   citaChipGestor: { fontSize: 9, fontWeight: 500, opacity: 0.75, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
   citaChipNoAsistio: { fontSize: 9, fontWeight: 700, color: TOKENS.dangerText, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
   citaChipAsistio: { fontSize: 9, fontWeight: 700, color: TOKENS.successText, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
+  citaChipPedido: { fontSize: 9, fontWeight: 700, color: TOKENS.warningText, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
 
   legendTitulo: { marginTop: 20, fontSize: 12, fontWeight: 600, color: TOKENS.textMuted },
   legendVacacionesTag: { fontSize: 10, fontWeight: 600, color: TOKENS.warningText, background: TOKENS.warningBg, padding: "2px 7px", borderRadius: 999, flexShrink: 0 },
